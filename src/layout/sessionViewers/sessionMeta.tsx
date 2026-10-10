@@ -89,18 +89,13 @@ function rawKindIcon(kind: SessionKind, size: number) {
       return <Icons.terminal size={size} />;
     case "browser":
       return <Icons.globe size={size} />;
-    // Claude uses the generic outlined robot icon.
+    // These agents share their official brand marks across the session tree, tabs, menus and Usage.
     case "claude":
-      return <Icons.bot size={size} />;
-    // These agents use their official logos, falling back to the robot when brandIconEl lacks one.
     case "opencode":
-      return brandIconEl("opencode", size) ?? <Icons.bot size={size} />;
     case "copilot":
-      return brandIconEl("copilot", size) ?? <Icons.bot size={size} />;
     case "cursor":
-      return brandIconEl("cursor", size) ?? <Icons.bot size={size} />;
     case "cline":
-      return brandIconEl("cline", size) ?? <Icons.bot size={size} />;
+      return brandIconEl(kind, size) ?? <Icons.bot size={size} />;
     // Antigravity uses a custom rising-chevron mark because simple-icons does not include it.
     case "antigravity":
       return antigravityMarkEl(size);

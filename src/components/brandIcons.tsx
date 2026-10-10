@@ -1,8 +1,7 @@
 //! Official solid agent brand icons alongside the outline system in Icons.tsx. Most paths come from
 //! simple-icons and tree-shake in production. A 24-unit viewBox with currentColor fill follows theme
 //! and accent colors. simple-icons excludes OpenAI, so OPENAI_PATH embeds the official Codex mark.
-//! Session-tree and Usage source icons share these assets; Claude Usage uses its orange siClaude star
-//! while the session tree retains the robot icon.
+//! Session-tree and Usage source icons share these assets, including Claude's orange siClaude star.
 import { siClaude, siCline, siCursor, siGithubcopilot, siOpencode } from "simple-icons";
 import type { SimpleIcon } from "simple-icons";
 
@@ -69,11 +68,9 @@ function BrandIcon({ icon, size = 14 }: { icon: SimpleIcon; size?: number }) {
   );
 }
 
-/**
- * Map agent types to official simple-icons marks; callers provide fallbacks for others. Claude is
- * intentionally absent because sessionMeta.kindIconEl uses the preferred robot icon.
- */
+/** Map agent types to official simple-icons marks; callers provide fallbacks for others. */
 const BRAND: Record<string, SimpleIcon> = {
+  claude: siClaude,
   opencode: siOpencode,
   copilot: siGithubcopilot,
   cursor: siCursor,
@@ -281,7 +278,7 @@ export const GROK_BRAND_COLOR = "var(--grok-brand-color)";
 /**
  * Usage source icons: Claude uses the official orange siClaude star and Codex uses the OpenAI mark in
  * CODEX_BRAND_COLOR, matching the session tree. Grok uses its theme-aware official monochrome color.
- * Claude intentionally differs from its tree robot. Return null for other agents so callers can fall back.
+ * Return null for other agents so callers can fall back.
  */
 export function usageBrandIconEl(kind: string, size = 14) {
   if (kind === "claude") return <BrandIcon icon={siClaude} size={size} />;
@@ -299,6 +296,3 @@ export function usageBrandIconEl(kind: string, size = 14) {
     );
   return null;
 }
-
-// Earlier custom orange Claude robots (pixel and rounded) were unsatisfactory, so sessionMeta uses the
-// generic outline Icons.bot. A future colored robot can be added here as a separate component.
