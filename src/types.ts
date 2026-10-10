@@ -215,7 +215,8 @@ export interface SessionRuntime {
    * fabricate precise state. Other terminal agents leave this unset.
    */
   agentStateSource?: "hooks" | "legacy" | "chat";
-  /** Whether modern Codex has completed its SessionStart hook callback. False means hook health is unproven. */
+  /** Whether a modern Codex SessionStart or authoritative lifecycle callback has arrived. False means hook
+   * health is unproven, not that the agent process is stopped; SessionStart may wait for the first prompt. */
   agentHookReady?: boolean;
   /**
    * Whether a full authoritative lifecycle event has been received from official hooks or an agent plugin.
@@ -291,20 +292,17 @@ export interface SessionRuntime {
 
 /**
  * Resolve the state displayed by a status indicator. Process exit/error takes precedence; otherwise agent
- * sessions use agent activity, and all other cases fall back to lifecycle state (idle/running).
+ * sessions use reported agent activity, and all other cases fall back to process lifecycle state.
+ * Hook readiness is independent: Codex may defer SessionStart until the first prompt, so no callback yet
+ * must not hide a running process or invent a working/waiting state.
  */
 export function effectiveStatus(rt: SessionRuntime | undefined): DisplayStatus {
   if (!rt) return "idle";
   if (rt.status === "exited" || rt.status === "error") return rt.status;
   if (rt.agent && rt.agentState) return rt.agentState;
-  if (
-    rt.agent === "codex" &&
-    rt.agentStateSource === "hooks" &&
-    !rt.agentHookReady
-  ) {
-    return "unavailable";
-  }
-  return rt.status;
+  // A backend record also describes running sessions this client has never opened, whose local status
+  // is still idle. Use that explicit process fact without deriving agent activity from terminal output.
+  return rt.alive === true ? "running" : rt.status;
 }
 
 /**

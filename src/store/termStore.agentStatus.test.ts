@@ -69,7 +69,7 @@ afterEach(() => {
 });
 
 describe("Codex lifecycle hook state arbitration", () => {
-  it("a hooks source locks into authoritative mode before the first event and explicitly reports the status as unavailable", () => {
+  it("a hooks source blocks activity guesses while the process stays running before the first callback", () => {
     useTermStore.getState().applyStatusSignal(sessionId, {
       kind: "agent",
       agent: "codex",
@@ -83,11 +83,12 @@ describe("Codex lifecycle hook state arbitration", () => {
       agentHookReady: false,
       authoritative: true,
     });
-    expect(effectiveStatus(runtime)).toBe("unavailable");
+    expect(effectiveStatus(runtime)).toBe("running");
 
     useTermStore.getState().applyScreenDetection(sessionId, visibleWorking);
     useTermStore.getState().applyStatusSignal(sessionId, { kind: "busy", busy: true });
     expect(useTermStore.getState().runtimes[sessionId].agentState).toBeNull();
+    expect(effectiveStatus(useTermStore.getState().runtimes[sessionId])).toBe("running");
 
     useTermStore.getState().applyStatusSignal(sessionId, { kind: "hook_ready" });
     const ready = useTermStore.getState().runtimes[sessionId];

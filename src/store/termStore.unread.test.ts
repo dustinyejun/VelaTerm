@@ -200,6 +200,7 @@ describe("agent state from the backend record", () => {
 
     useTermStore.getState().applySessionStates({
       "cx-1": {
+        alive: true,
         agent: "codex",
         stateSource: "hooks",
         hookReady: false,
@@ -210,8 +211,30 @@ describe("agent state from the backend record", () => {
 
     const rt = useTermStore.getState().runtimes["cx-1"];
     expect(rt.agentStateSource).toBe("hooks");
-    // Codex in hook-only mode reads as unavailable until its handshake proves the hooks actually run.
-    expect(effectiveStatus(rt)).toBe("unavailable");
+    // A remote client has not opened this terminal, but the backend proves its process is running.
+    // Hook readiness remains unproven until Codex submits its first prompt.
+    expect(rt.status).toBe("idle");
+    expect(rt.agentHookReady).toBe(false);
+    expect(effectiveStatus(rt)).toBe("running");
+  });
+
+  it("moves a Codex process from running to working and viewed only as backend activity arrives", () => {
+    useTermStore.setState({ runtimes: {} });
+    const process = { agent: "codex", stateSource: "hooks", alive: true, authoritative: true } as const;
+    useTermStore.getState().applySessionStates({ [SID]: { ...process, hookReady: false } });
+    expect(effectiveStatus(useTermStore.getState().runtimes[SID])).toBe("running");
+    expect(useTermStore.getState().notifications).toEqual({});
+
+    useTermStore.getState().applySessionStates({
+      [SID]: { ...process, hookReady: true, agentState: "working", everWorked: true },
+    });
+    expect(effectiveStatus(useTermStore.getState().runtimes[SID])).toBe("working");
+
+    useTermStore.getState().applySessionStates({
+      [SID]: { ...process, hookReady: true, agentState: "waiting", everWorked: true, unread: false },
+    });
+    expect(effectiveStatus(useTermStore.getState().runtimes[SID])).toBe("waiting");
+    expect(useTermStore.getState().notifications).toEqual({});
   });
 });
 

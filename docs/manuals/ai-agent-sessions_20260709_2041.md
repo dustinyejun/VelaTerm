@@ -115,7 +115,9 @@ terminal sessions. When Codex shows "Hooks need review", review the commands con
 and trust the VelaTerm entries. You can also open `/hooks` later. After review, subsequent prompts and
 tool calls can report the session's status and conversation ID. These callbacks are supplied through
 command-line configuration, so Codex may ask for review again when a session restarts. Until trusted, lifecycle
-status reporting is unavailable. VelaTerm does not bypass hook trust.
+activity reporting is unavailable. A running process still shows a blue "Running" dot before its first
+callback; Codex may defer `SessionStart` until the first prompt. Working, permission requests and completed
+turns are shown only after their activity callbacks arrive. VelaTerm does not bypass hook trust.
 On versions that support `--no-daemon`, these terminal sessions use an independent embedded server so
 their temporary configuration and status callbacks stay scoped to the session. Older versions retain
 their supported launch options. This does not change the conversation view's app-server connection.

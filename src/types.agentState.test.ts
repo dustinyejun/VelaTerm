@@ -1,10 +1,33 @@
 //! State categories behind the sidebar dots, the status filters, and the status bar counts.
 
 import { describe, expect, it } from "vitest";
-import { countByAgentState, matchesAgentState, type SessionRuntime } from "./types";
+import { countByAgentState, effectiveStatus, matchesAgentState, type SessionRuntime } from "./types";
 
 const runtime = (agentState: SessionRuntime["agentState"]): SessionRuntime =>
   ({ status: "running", agent: "claude", agentState }) as SessionRuntime;
+
+describe("Codex process lifecycle before the first hook", () => {
+  const started: SessionRuntime = {
+    status: "idle",
+    alive: true,
+    agent: "codex",
+    agentStateSource: "hooks",
+    agentHookReady: false,
+    authoritative: true,
+  };
+
+  it("shows a backend-confirmed process as running without counting an empty session as agent activity", () => {
+    expect(effectiveStatus(started)).toBe("running");
+    expect(countByAgentState([{ id: "codex" }], { codex: started }, {})).toEqual({
+      working: 0, asking: 0, waiting: 0, background: 0,
+    });
+    expect(effectiveStatus({ ...started, alive: false })).toBe("idle");
+  });
+
+  it.each(["exited", "error"] as const)("preserves %s despite stale process or hook state", (status) => {
+    expect(effectiveStatus({ ...started, status, agentState: "working" })).toBe(status);
+  });
+});
 
 describe("background agent state", () => {
   it("counts as background only once its reply has been read", () => {
