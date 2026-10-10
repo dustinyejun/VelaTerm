@@ -319,7 +319,7 @@ fn pwsh_native_arguments_round_trip() {
             Some(path_text(&probe.executable)),
             None,
             None,
-            false,
+            CodexLaunchCapabilities::default(),
             false,
         );
         spawn.env.extend(selection_env);

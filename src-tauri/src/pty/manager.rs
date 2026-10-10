@@ -690,9 +690,12 @@ impl PtyManager {
         } else {
             None
         };
-        // Windows temporarily forgoes lifecycle hooks; see `codex_lifecycle_hooks_supported`.
-        let codex_hooks_supported = kind != SessionKind::Codex
-            || (!cfg!(windows) && codex_lifecycle_hooks_supported(bin_path.as_deref()));
+        let codex_capabilities = if kind == SessionKind::Codex {
+            codex_launch_capabilities(bin_path.as_deref())
+        } else {
+            inject::CodexLaunchCapabilities::default()
+        };
+        let codex_hooks_supported = codex_capabilities.lifecycle_hooks;
         let should_capture_agent_id = resume_id.is_none() || fork;
         let mut terminal_thinking_off = false;
         let extra_args = if matches!(kind, SessionKind::Claude | SessionKind::Codex | SessionKind::Opencode | SessionKind::Antigravity) {
@@ -724,7 +727,7 @@ impl PtyManager {
             bin_path.as_deref(),
             agent_ext_path.as_deref(),
             kiro_agent.as_deref(),
-            codex_hooks_supported,
+            codex_capabilities,
             bin_broken,
         );
         // Windows only: set Claude's theme explicitly in `--settings`. ConPTY answers OSC 11 with its own
@@ -1902,18 +1905,18 @@ fn open_recorder(app: &AppCtx, id: &str) -> Option<Recorder> {
     Some(Recorder::new(file, existing_len, RECORDING_CAP))
 }
 
-/// Detects whether the installed Codex supports the trust flag required for lifecycle-hook injection.
+/// Detects lifecycle-hook support and explicit embedded mode independently from public CLI help.
 ///
 /// Inspects only public `--help` output without starting a session or using the network. Failure means
 /// unsupported and retains notify/screen/busy fallback. Windows `.cmd` wrappers run through cmd.exe; native
 /// executables run directly. Probe each launch so an in-place Codex upgrade takes effect immediately.
 ///
-/// Callers currently skip this probe on Windows and never inject hooks there. The inline TOML table passed
+/// Windows never injects hooks. The inline TOML table passed
 /// as `-c hooks=<table>` contains spaces and double quotes, and an npm-installed `codex.cmd` re-parses the
 /// command line through cmd.exe, which drops the quoting and splits the value into separate arguments. Codex
 /// then rejects the stray `--codex-hook` token and refuses to start (issue #53). Restore Windows hook support
 /// once the handlers move into `~/.codex/hooks.json`, leaving only quote-free flags on the command line.
-fn codex_lifecycle_hooks_supported(bin_path: Option<&str>) -> bool {
+fn codex_launch_capabilities(bin_path: Option<&str>) -> inject::CodexLaunchCapabilities {
     let program = bin_path.filter(|p| !p.trim().is_empty()).unwrap_or("codex");
     #[cfg(windows)]
     let output = {
@@ -1930,11 +1933,17 @@ fn codex_lifecycle_hooks_supported(bin_path: Option<&str>) -> bool {
     let output = crate::host::command(program).arg("--help").output();
 
     let Ok(output) = output else {
-        return false;
+        return inject::CodexLaunchCapabilities::default();
     };
+    if !output.status.success() {
+        return inject::CodexLaunchCapabilities::default();
+    }
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
-    text.contains("--dangerously-bypass-hook-trust")
+    let mut capabilities = inject::CodexLaunchCapabilities::from_help(&text);
+    // The quote-free --no-daemon flag remains safe through Windows command wrappers.
+    capabilities.lifecycle_hooks &= !cfg!(windows);
+    capabilities
 }
 
 fn recording_enabled(app: &AppCtx) -> bool {

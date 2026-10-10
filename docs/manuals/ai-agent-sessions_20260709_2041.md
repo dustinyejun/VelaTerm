@@ -2,7 +2,7 @@
 
 Created: 2026-07-09 20:41
 
-Updated: 2026-09-30 21:12
+Updated: 2026-10-10
 
 > This chapter covers how VelaTerm hosts AI coding agents as typed sessions: supported agents, live status, automatic conversation resume, importing and forking conversations, permission modes, launch settings, install guidance and the Info panel. The conversation view has its own chapter: [Conversation View](conversation-view_20260925_1012.md).
 
@@ -109,6 +109,16 @@ Some changes apply only after the agent restarts. VelaTerm then offers "Restart 
 - "Install docs" opens the agent's installation documentation; "I'll do it myself" closes the card.
 
 Each agent still needs its own sign-in or API key after installation.
+
+**Codex terminal hooks.** On versions with lifecycle hooks, VelaTerm injects status callbacks for its
+terminal sessions. When Codex shows "Hooks need review", review the commands containing `--codex-hook`
+and trust the VelaTerm entries. You can also open `/hooks` later. After review, subsequent prompts and
+tool calls can report the session's status and conversation ID. These callbacks are supplied through
+command-line configuration, so Codex may ask for review again when a session restarts. Until trusted, lifecycle
+status reporting is unavailable. VelaTerm does not bypass hook trust.
+On versions that support `--no-daemon`, these terminal sessions use an independent embedded server so
+their temporary configuration and status callbacks stay scoped to the session. Older versions retain
+their supported launch options. This does not change the conversation view's app-server connection.
 
 ## 8. The Info panel: usage, context and resources
 
