@@ -646,6 +646,12 @@ const ko: typeof en = {
   "settings.uiFontSize": "Interface size", // TODO translate
   "settings.termFont": "Terminal font", // TODO translate
   "settings.termFontSize": "Terminal size", // TODO translate
+  "settings.uiFontWeight": "인터페이스 글꼴 굵기",
+  "settings.termFontWeight": "터미널 글꼴 굵기",
+  "settings.weightRegular": "보통",
+  "settings.weightMedium": "중간",
+  "settings.weightSemibold": "약간 굵게",
+  "settings.weightBold": "굵게",
   "settings.termLineHeight": "터미널 줄 높이",
   "settings.chatTypography": "대화 보기",
   "settings.chatTypographyHint": "글꼴 설정은 터미널과 별도로 저장되며 변경 사항은 즉시 적용됩니다.",

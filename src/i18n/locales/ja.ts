@@ -646,6 +646,12 @@ const ja: typeof en = {
   "settings.uiFontSize": "Interface size", // TODO translate
   "settings.termFont": "Terminal font", // TODO translate
   "settings.termFontSize": "Terminal size", // TODO translate
+  "settings.uiFontWeight": "インターフェースの太さ",
+  "settings.termFontWeight": "ターミナルの太さ",
+  "settings.weightRegular": "標準",
+  "settings.weightMedium": "ミディアム",
+  "settings.weightSemibold": "セミボールド",
+  "settings.weightBold": "太字",
   "settings.termLineHeight": "ターミナルの行の高さ",
   "settings.chatTypography": "会話ビュー",
   "settings.chatTypographyHint": "フォント設定はターミナルとは別に保存され、変更はすぐに反映されます。",

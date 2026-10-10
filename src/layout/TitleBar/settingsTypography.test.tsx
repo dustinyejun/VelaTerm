@@ -107,6 +107,23 @@ it("provides separate controls and resets only the selected conversation value",
 });
 
 it("normalizes malformed or out-of-range saved typography", () => {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify({ chatFontSize: 999, chatLineHeight: null, chatFontFamily: 123, termLineHeight: 0 }));
-  expect(loadSettings()).toMatchObject({ chatFontSize: 24, chatLineHeight: 1.2, chatFontFamily: null, termLineHeight: 1 });
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify({ chatFontSize: 999, chatLineHeight: null, chatFontFamily: 123, termLineHeight: 0, uiFontWeight: "bold", termFontWeight: 999 }));
+  expect(loadSettings()).toMatchObject({ chatFontSize: 24, chatLineHeight: 1.2, chatFontFamily: null, termLineHeight: 1, uiFontWeight: 400, termFontWeight: 400 });
+});
+
+it("changes and restores interface and terminal weights independently through settings", async () => {
+  await act(async () => render(<SettingsModal onClose={() => {}} />));
+  fireEvent.click(screen.getByRole("combobox", { name: "Interface weight" }));
+  fireEvent.click(screen.getByRole("option", { name: /Medium/ }));
+  expect(document.documentElement.style.getPropertyValue("--ui-font-weight")).toBe("500");
+  expect(loadSettings()).toMatchObject({ uiFontWeight: 500, termFontWeight: 400 });
+  fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+  fireEvent.click(screen.getByRole("combobox", { name: "Terminal weight" }));
+  fireEvent.click(screen.getByRole("option", { name: /Semibold/ }));
+  expect(loadSettings()).toMatchObject({ uiFontWeight: 500, termFontWeight: 600 });
+  expect(pushSetting).toHaveBeenLastCalledWith(SETTINGS_KEY, expect.stringContaining('"termFontWeight":600'));
+  useTermStore.setState({ uiFontWeight: 400, termFontWeight: 400 });
+  useTermStore.getState().hydrateSettingsFromCache();
+  expect(useTermStore.getState()).toMatchObject({ uiFontWeight: 500, termFontWeight: 600 });
+  expect(document.documentElement.style.getPropertyValue("--ui-font-weight")).toBe("500");
 });

@@ -55,6 +55,7 @@ import { dlog } from "../debug";
 import { t } from "../i18n";
 import { useTermStore } from "../store/termStore";
 import {
+  clearTerminalTextureAtlases,
   noteOsc52Copy,
   registerRedraw,
   registerSearch,
@@ -95,6 +96,8 @@ const fontsReadyPromise: Promise<void> = (async () => {
   try {
     const probes: [string, string][] = [
       ['16px "JetBrains Mono"', " "],
+      ['500 16px "JetBrains Mono"', "M"],
+      ['600 16px "JetBrains Mono"', "M"],
       ['16px "JetBrains Mono"', "█"],
       ['bold 16px "JetBrains Mono"', "█"],
     ];
@@ -161,6 +164,7 @@ export function usePtySession(session: Session, cwd?: string, hidden?: boolean) 
   // Subscribe to terminal font family/size for live application to this xterm.
   const termFontFamily = useTermStore((s) => s.termFontFamily);
   const termFontSize = useTermStore((s) => s.termFontSize);
+  const termFontWeight = useTermStore((s) => s.termFontWeight);
   const termLineHeight = useTermStore((s) => s.termLineHeight);
   // Window focus plus active-session state drives terminal FocusIn/FocusOut forwarding.
   const windowFocused = useTermStore((s) => s.windowFocused);
@@ -231,6 +235,8 @@ export function usePtySession(session: Session, cwd?: string, hidden?: boolean) 
     const term = new Terminal({
       fontFamily: fontStack(fontState.termFontFamily),
       fontSize: fontState.termFontSize,
+      fontWeight: fontState.termFontWeight,
+      fontWeightBold: 700,
       lineHeight: fontState.termLineHeight,
       cursorBlink: true,
       scrollback: 5000,
@@ -340,8 +346,9 @@ export function usePtySession(session: Session, cwd?: string, hidden?: boolean) 
     // terminal: termRef is assigned further down in this same synchronous block, so it is already set
     // by the time any await resumes, and cleanup clears it.
     const renderer = useTermStore.getState().termRenderer;
+    let rendererReady: Promise<void> = Promise.resolve();
     if (renderer === "webgl") {
-      void loadWebglCtor().then((Ctor) => {
+      rendererReady = loadWebglCtor().then((Ctor) => {
         if (!Ctor || termRef.current !== term) return;
         try {
           const webgl = new Ctor();
@@ -730,9 +737,10 @@ export function usePtySession(session: Session, cwd?: string, hidden?: boolean) 
     };
 
     const setup = async () => {
-      safeFit();
-      const cols = term.cols;
-      const rows = term.rows;
+      // WebGL rounds cell widths to device pixels, unlike DOM. Measure only after the selected
+      // renderer attaches; otherwise the PTY can keep the DOM grid while xterm fits a wider WebGL grid.
+      await rendererReady;
+      if (disposed) return;
 
       // Register independent exit/killed/status listeners in parallel to reduce Tauri IPC latency, but
       // always before spawn to avoid missing events. Natural exit closes the pane; remote kills close the
@@ -798,14 +806,16 @@ export function usePtySession(session: Session, cwd?: string, hidden?: boolean) 
         .takePendingPrompt(session.id);
 
       try {
+        // Layout may change while listener registration awaits IPC. Read the current grid at spawn.
+        safeFit();
         const result = await ptySpawn(
           {
             sessionId: session.id,
             kind: session.kind,
             shell: session.shell ?? undefined,
             cwd: cwd ?? undefined,
-            cols,
-            rows,
+            cols: term.cols,
+            rows: term.rows,
             initialPrompt: initialPrompt ?? undefined,
             // Inject UI brightness into Claude settings because Windows ConPTY blocks reliable OSC 11 detection.
             theme: resolveTheme(useTermStore.getState().theme),
@@ -836,8 +846,14 @@ export function usePtySession(session: Session, cwd?: string, hidden?: boolean) 
         const me = getClientSource();
         if (attached && result.owner !== null && result.owner !== me) {
           enterMirror(result.cols, result.rows);
-        } else if (attached && result.owner === null && isVisible()) {
-          ptyResize(session.id, term.cols, term.rows).catch(() => {});
+        } else if (isVisible()) {
+          // A resize before spawn completes can be ignored by the backend because the PTY does not
+          // exist yet. Reconcile the final visible grid with the authoritative spawn result, including
+          // new/self-owned sessions, before live output resumes. Mirrors must never claim this grid.
+          safeFit();
+          if ((attached && result.owner === null) || term.cols !== result.cols || term.rows !== result.rows) {
+            ptyResize(session.id, term.cols, term.rows).catch(() => {});
+          }
         }
         // Attach buffers are history and suppress responses; new-session buffers are live and may answer queries.
         openGate(attached);
@@ -1011,9 +1027,10 @@ export function usePtySession(session: Session, cwd?: string, hidden?: boolean) 
     const term = termRef.current;
     if (!term) return;
     const fam = fontStack(termFontFamily);
-    if (term.options.fontFamily === fam && term.options.fontSize === termFontSize && term.options.lineHeight === termLineHeight) return;
+    if (term.options.fontFamily === fam && term.options.fontSize === termFontSize && term.options.lineHeight === termLineHeight && term.options.fontWeight === termFontWeight) return;
     term.options.fontFamily = fam;
     term.options.fontSize = termFontSize;
+    term.options.fontWeight = termFontWeight;
     term.options.lineHeight = termLineHeight;
     const container = containerRef.current;
     if (modeRef.current === "mirror") {
@@ -1027,7 +1044,7 @@ export function usePtySession(session: Session, cwd?: string, hidden?: boolean) 
       ptyResize(session.id, term.cols, term.rows).catch(() => {});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [termFontFamily, termFontSize, termLineHeight]);
+  }, [termFontFamily, termFontSize, termLineHeight, termFontWeight]);
 
   // Restore visible layout and recover optional WebGL contexts. xterm 6 derives scroll geometry from
   // its render dimensions and resynchronizes it on redraw; scrolling up/down on reveal is unnecessary
@@ -1127,12 +1144,9 @@ export function usePtySession(session: Session, cwd?: string, hidden?: boolean) 
         }
 
         if (dimsChanged || redrawOnReveal || rebuiltWebgl) {
-          // Clear degraded WebGL glyph atlases and redraw so the renderer rerasterizes everything.
-          try {
-            rendererRef.current?.clearTextureAtlas();
-          } catch {
-            /* The addon may already be disposed. */
-          }
+          // Atlas clearing must invalidate every peer's model, including hidden terminals, because
+          // matching WebGL renderers share the atlas. A local refresh leaves peer glyph coordinates stale.
+          if (rendererRef.current) clearTerminalTextureAtlases();
           term.refresh(0, term.rows - 1);
         }
       });

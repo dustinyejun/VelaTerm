@@ -27,6 +27,7 @@
   /* density (overridden by [data-density]) */
   --row-h: 28px;
   --ui-fs: 12.5px;
+  --ui-font-weight: 400;
   --term-fs: 13px;
   /* Startup fallbacks; applyVisual supplies the independently persisted conversation settings. */
   --chat-font: var(--font-mono);
@@ -119,7 +120,9 @@ body {
   background: var(--bg-0);
   color: var(--text);
   font-size: var(--ui-fs);
-  -webkit-font-smoothing: antialiased;
+  /* Let the platform select its text rasterization instead of forcing thin grayscale strokes. */
+  -webkit-font-smoothing: auto;
+  font-weight: var(--ui-font-weight);
   overflow: hidden;
   /* Source must display every character. JetBrains Mono renders `<!--`/`-->` arrows through `calt`,
      so disabling only `liga` would still make Markdown comments appear rewritten. */

@@ -648,6 +648,12 @@ const fr: typeof en = {
   "settings.uiFontSize": "Interface size", // TODO translate
   "settings.termFont": "Terminal font", // TODO translate
   "settings.termFontSize": "Terminal size", // TODO translate
+  "settings.uiFontWeight": "Graisse de l’interface",
+  "settings.termFontWeight": "Graisse du terminal",
+  "settings.weightRegular": "Normal",
+  "settings.weightMedium": "Moyen",
+  "settings.weightSemibold": "Demi-gras",
+  "settings.weightBold": "Gras",
   "settings.termLineHeight": "Interligne du terminal",
   "settings.chatTypography": "Vue de conversation",
   "settings.chatTypographyHint": "Ces paramètres de police sont indépendants du terminal et prennent effet immédiatement.",

@@ -921,6 +921,16 @@ impl PtyManager {
             }
         }
 
+        // Respect shells' leading-space history exclusion (zsh HIST_IGNORE_SPACE, Bash ignorespace,
+        // and fish). Mark only backend-generated startup commands, after adding the PATH prefix, so
+        // they do not leak into shared history. User initCmd and ordinary PTY input stay untouched.
+        // Apply before taking the durable initial launch so both dispatch paths use the same command.
+        if matches!(inject::shell_kind(&shell), inject::ShellKind::Posix | inject::ShellKind::Fish) {
+            if let Some(command) = launch.as_mut() {
+                command.insert(0, ' ');
+            }
+        }
+
         let initial_launch = match initial_task.as_ref() {
             Some(_) => Some(launch.take().ok_or("The initial task has no agent launch command")?),
             None => None,

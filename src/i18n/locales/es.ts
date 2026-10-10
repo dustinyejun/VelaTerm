@@ -648,6 +648,12 @@ const es: typeof en = {
   "settings.uiFontSize": "Interface size", // TODO translate
   "settings.termFont": "Terminal font", // TODO translate
   "settings.termFontSize": "Terminal size", // TODO translate
+  "settings.uiFontWeight": "Grosor de la interfaz",
+  "settings.termFontWeight": "Grosor del terminal",
+  "settings.weightRegular": "Normal",
+  "settings.weightMedium": "Medio",
+  "settings.weightSemibold": "Seminegrita",
+  "settings.weightBold": "Negrita",
   "settings.termLineHeight": "Interlineado del terminal",
   "settings.chatTypography": "Vista de conversación",
   "settings.chatTypographyHint": "Estos ajustes de fuente son independientes del terminal y se aplican de inmediato.",

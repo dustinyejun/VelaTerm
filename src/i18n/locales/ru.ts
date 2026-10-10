@@ -656,6 +656,12 @@ const ru: typeof en = {
   "settings.uiFontSize": "Interface size", // TODO translate
   "settings.termFont": "Terminal font", // TODO translate
   "settings.termFontSize": "Terminal size", // TODO translate
+  "settings.uiFontWeight": "Насыщенность шрифта интерфейса",
+  "settings.termFontWeight": "Насыщенность шрифта терминала",
+  "settings.weightRegular": "Обычный",
+  "settings.weightMedium": "Средний",
+  "settings.weightSemibold": "Полужирный",
+  "settings.weightBold": "Жирный",
   "settings.termLineHeight": "Высота строки в терминале",
   "settings.chatTypography": "Просмотр диалога",
   "settings.chatTypographyHint": "Эти настройки шрифта не зависят от терминала и применяются сразу.",

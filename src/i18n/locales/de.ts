@@ -647,6 +647,12 @@ const de: typeof en = {
   "settings.uiFontSize": "Interface size", // TODO translate
   "settings.termFont": "Terminal font", // TODO translate
   "settings.termFontSize": "Terminal size", // TODO translate
+  "settings.uiFontWeight": "Schriftstärke der Oberfläche",
+  "settings.termFontWeight": "Schriftstärke des Terminals",
+  "settings.weightRegular": "Normal",
+  "settings.weightMedium": "Mittel",
+  "settings.weightSemibold": "Halbfett",
+  "settings.weightBold": "Fett",
   "settings.termLineHeight": "Zeilenhöhe im Terminal",
   "settings.chatTypography": "Unterhaltungsansicht",
   "settings.chatTypographyHint": "Diese Schrifteinstellungen sind unabhängig vom Terminal und werden sofort wirksam.",

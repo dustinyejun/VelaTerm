@@ -28,7 +28,7 @@ import { env, platform } from "../../platform";
 import type { VelaCommandStatus } from "../../platform/types";
 import { COMPOSER_CHIP_IDS, INPUT_LATENCY_THRESHOLDS, type ComposerChipId } from "../../store/settings";
 import { useTermStore, type TermRenderer } from "../../store/termStore";
-import { DEFAULT_CONVERSATION_FONT_SIZE, DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_LINE_HEIGHT } from "../../theme";
+import { DEFAULT_CONVERSATION_FONT_SIZE, DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_LINE_HEIGHT, normalizeTextFontWeight, type TextFontWeight } from "../../theme";
 import type {
   AccentChoice,
   Density,
@@ -58,6 +58,22 @@ const ACCENT_HEX: Record<string, string> = {
   violet: "#b08bff",
 };
 const ACCENTS: AccentChoice[] = ["auto", "green", "blue", "amber", "violet"];
+
+function FontWeightSelect({ value, onChange, label }: {
+  value: TextFontWeight;
+  onChange: (value: TextFontWeight) => void;
+  label: string;
+}) {
+  const t = useT();
+  return <Select value={String(value)} ariaLabel={label} width={160} size="sm"
+    options={[
+      { value: "400", label: t("settings.weightRegular"), hint: "400" },
+      { value: "500", label: t("settings.weightMedium"), hint: "500" },
+      { value: "600", label: t("settings.weightSemibold"), hint: "600" },
+      { value: "700", label: t("settings.weightBold"), hint: "700" },
+    ]}
+    onChange={(weight) => onChange(normalizeTextFontWeight(Number(weight)))} />;
+}
 
 /** Shared style for the font-size stepper's minus/plus buttons. */
 const STEP_BTN: React.CSSProperties = {
@@ -342,16 +358,20 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const toggleSound = useTermStore((s) => s.toggleSound);
   const uiFontFamily = useTermStore((s) => s.uiFontFamily);
   const uiFontSize = useTermStore((s) => s.uiFontSize);
+  const uiFontWeight = useTermStore((s) => s.uiFontWeight);
   const termFontFamily = useTermStore((s) => s.termFontFamily);
   const termFontSize = useTermStore((s) => s.termFontSize);
+  const termFontWeight = useTermStore((s) => s.termFontWeight);
   const termLineHeight = useTermStore((s) => s.termLineHeight);
   const chatFontFamily = useTermStore((s) => s.chatFontFamily);
   const chatFontSize = useTermStore((s) => s.chatFontSize);
   const chatLineHeight = useTermStore((s) => s.chatLineHeight);
   const setUiFontFamily = useTermStore((s) => s.setUiFontFamily);
   const setUiFontSize = useTermStore((s) => s.setUiFontSize);
+  const setUiFontWeight = useTermStore((s) => s.setUiFontWeight);
   const setTermFontFamily = useTermStore((s) => s.setTermFontFamily);
   const setTermFontSize = useTermStore((s) => s.setTermFontSize);
+  const setTermFontWeight = useTermStore((s) => s.setTermFontWeight);
   const setTermLineHeight = useTermStore((s) => s.setTermLineHeight);
   const setChatFontFamily = useTermStore((s) => s.setChatFontFamily);
   const setChatFontSize = useTermStore((s) => s.setChatFontSize);
@@ -544,6 +564,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 <Field label={t("settings.uiFont")}>
                   <FontSelect fonts={fonts} value={uiFontFamily} onChange={setUiFontFamily} label={t("settings.uiFont")} />
                 </Field>
+                <Field label={t("settings.uiFontWeight")}>
+                  <FontWeightSelect value={uiFontWeight} onChange={setUiFontWeight} label={t("settings.uiFontWeight")} />
+                </Field>
                 <Field label={t("settings.uiFontSize")}>
                   <FontSizeStepper
                     value={uiFontSize}
@@ -566,6 +589,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 <ShellSelect />
                 <Field label={t("settings.termFont")}>
                   <FontSelect fonts={fonts} value={termFontFamily} onChange={setTermFontFamily} label={t("settings.termFont")} />
+                </Field>
+                <Field label={t("settings.termFontWeight")}>
+                  <FontWeightSelect value={termFontWeight} onChange={setTermFontWeight} label={t("settings.termFontWeight")} />
                 </Field>
                 <Field label={t("settings.termFontSize")}>
                   <FontSizeStepper

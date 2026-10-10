@@ -648,6 +648,12 @@ const ptBR: typeof en = {
   "settings.uiFontSize": "Interface size", // TODO translate
   "settings.termFont": "Terminal font", // TODO translate
   "settings.termFontSize": "Terminal size", // TODO translate
+  "settings.uiFontWeight": "Peso da interface",
+  "settings.termFontWeight": "Peso do terminal",
+  "settings.weightRegular": "Normal",
+  "settings.weightMedium": "Médio",
+  "settings.weightSemibold": "Seminegrito",
+  "settings.weightBold": "Negrito",
   "settings.termLineHeight": "Altura da linha do terminal",
   "settings.chatTypography": "Visualização da conversa",
   "settings.chatTypographyHint": "Estas configurações de fonte são independentes do terminal e entram em vigor imediatamente.",

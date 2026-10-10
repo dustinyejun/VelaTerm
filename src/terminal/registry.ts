@@ -59,6 +59,21 @@ export function unregisterRedraw(id: string, fn: () => void) {
   if (redrawHandlers.get(id) === fn) redrawHandlers.delete(id);
 }
 
+/** Invalidate every renderer before repainting a shared WebGL glyph atlas. xterm shares atlases between
+ * terminals with matching font/color settings, but clearTextureAtlas only clears the caller's render
+ * model. Peers otherwise retain stale texture coordinates; refresh alone skips their unchanged cells.
+ * Keep this synchronous so all models are invalidated before the next animation frame, including hidden
+ * terminals whose RenderService defers the full refresh until they become visible. DOM safely ignores it. */
+export function clearTerminalTextureAtlases() {
+  for (const term of registry.values()) {
+    try {
+      term.clearTextureAtlas();
+    } catch {
+      /* A disposed/lost renderer must not prevent the remaining terminals from recovering. */
+    }
+  }
+}
+
 /** Manual full-screen redraw. Prefer usePtySession's hard-redraw callback, which performs the complete
  * manual-resize recovery for three corruption classes:
  *
@@ -72,6 +87,7 @@ export function unregisterRedraw(id: string, fn: () => void) {
  * If no callback was registered because of early startup or failure, fall back to frontend redraw plus
  * backend resize pulse, covering only cases 2 and 3. */
 export function redrawTerminal(id: string) {
+  clearTerminalTextureAtlases();
   const handler = redrawHandlers.get(id);
   if (handler) {
     handler();

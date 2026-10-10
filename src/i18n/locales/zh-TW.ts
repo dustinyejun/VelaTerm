@@ -638,6 +638,12 @@ const zhTW: typeof en = {
   "settings.uiFontSize": "介面字級", // Interface size
   "settings.termFont": "終端機字型", // Terminal font
   "settings.termFontSize": "終端機字級", // Terminal size
+  "settings.uiFontWeight": "介面字重",
+  "settings.termFontWeight": "終端機字重",
+  "settings.weightRegular": "一般",
+  "settings.weightMedium": "中等",
+  "settings.weightSemibold": "半粗",
+  "settings.weightBold": "粗體",
   "settings.termLineHeight": "終端機行高",
   "settings.chatTypography": "對話檢視",
   "settings.chatTypographyHint": "字型設定與終端機分開儲存，變更後立即生效。",

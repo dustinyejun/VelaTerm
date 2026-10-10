@@ -85,6 +85,8 @@ import {
   type PaneStyle,
   type ResolvedTheme,
   type Theme,
+  type TextFontWeight,
+  normalizeTextFontWeight,
 } from "../theme";
 import { liveTerminalIds } from "../terminal/registry";
 import { checkTabInvariants, DEBUG } from "../debug";
@@ -1078,10 +1080,12 @@ interface TermStore {
   uiFontFamily: string | null;
   /** Interface font size in pixels, or `null` to follow density. */
   uiFontSize: number | null;
+  uiFontWeight: TextFontWeight;
   /** Terminal monospace font, applied live to all terminals. */
   termFontFamily: string | null;
   /** Terminal font size in pixels, applied live to all terminals. */
   termFontSize: number;
+  termFontWeight: TextFontWeight;
   termLineHeight: number;
   chatFontFamily: string | null;
   chatFontSize: number;
@@ -1553,10 +1557,12 @@ interface TermStore {
   setUiFontFamily: (v: string | null) => void;
   /** Interface font size in pixels; `null` follows density. */
   setUiFontSize: (v: number | null) => void;
+  setUiFontWeight: (v: TextFontWeight) => void;
   /** Terminal font family; empty or `null` uses the default stack. */
   setTermFontFamily: (v: string | null) => void;
   /** Terminal font size in pixels, clamped to 10–24. */
   setTermFontSize: (v: number) => void;
+  setTermFontWeight: (v: TextFontWeight) => void;
   setTermLineHeight: (v: number) => void;
   setChatFontFamily: (v: string | null) => void;
   setChatFontSize: (v: number) => void;
@@ -1716,8 +1722,10 @@ function persistAndApplyVisual(getState: () => TermStore) {
     defaultShell: s.defaultShell,
     uiFontFamily: s.uiFontFamily,
     uiFontSize: s.uiFontSize,
+    uiFontWeight: s.uiFontWeight,
     termFontFamily: s.termFontFamily,
     termFontSize: s.termFontSize,
+    termFontWeight: s.termFontWeight,
     termLineHeight: s.termLineHeight,
     chatFontFamily: s.chatFontFamily,
     chatFontSize: s.chatFontSize,
@@ -4771,6 +4779,14 @@ export const useTermStore = create<TermStore>((set, get) => ({
   },
   setTermFontFamily: (v) => {
     set({ termFontFamily: v && v.trim() ? v.trim() : null });
+    persistAndApplyVisual(get);
+  },
+  setUiFontWeight: (v) => {
+    set({ uiFontWeight: normalizeTextFontWeight(v) });
+    persistAndApplyVisual(get);
+  },
+  setTermFontWeight: (v) => {
+    set({ termFontWeight: normalizeTextFontWeight(v) });
     persistAndApplyVisual(get);
   },
   setTermFontSize: (v) => {

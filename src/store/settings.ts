@@ -3,7 +3,7 @@
 //! SettingsModal and the store share types while reducing the size of the main store.
 
 import { pushSetting } from "../ipc/settingsSync";
-import { DEFAULT_CONVERSATION_FONT_SIZE, DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_LINE_HEIGHT, normalizeTextSize, normalizeTextLineHeight } from "../theme";
+import { DEFAULT_CONVERSATION_FONT_SIZE, DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_LINE_HEIGHT, DEFAULT_TEXT_FONT_WEIGHT, normalizeTextSize, normalizeTextLineHeight, normalizeTextFontWeight } from "../theme";
 import type {
   AccentChoice,
   DarkStyle,
@@ -13,6 +13,7 @@ import type {
   NavLayout,
   PaneStyle,
   VisualSettings,
+  TextFontWeight,
 } from "../theme";
 import type { SessionEngine, SessionKind } from "../types";
 
@@ -148,10 +149,13 @@ export interface PersistedSettings {
   uiFontFamily: string | null;
   /** UI font size in pixels; null follows density without an inline `--ui-fs`. */
   uiFontSize: number | null;
+  uiFontWeight: TextFontWeight;
   /** Primary terminal monospace font; null uses the default stack. */
   termFontFamily: string | null;
   /** Terminal font size in pixels, defaulting to 13. */
   termFontSize: number;
+  /** Regular terminal text weight; ANSI bold remains at least 700. */
+  termFontWeight: TextFontWeight;
   /** Line-height multiplier, independent of conversation typography. */
   termLineHeight: number;
   /** Conversation typography is saved independently of terminal preferences. */
@@ -271,8 +275,10 @@ const SETTINGS_DEFAULTS: PersistedSettings = {
   defaultShell: "",
   uiFontFamily: null,
   uiFontSize: null,
+  uiFontWeight: DEFAULT_TEXT_FONT_WEIGHT,
   termFontFamily: null,
   termFontSize: DEFAULT_TERMINAL_FONT_SIZE,
+  termFontWeight: DEFAULT_TEXT_FONT_WEIGHT,
   termLineHeight: DEFAULT_TERMINAL_LINE_HEIGHT,
   chatFontFamily: null,
   chatFontSize: DEFAULT_CONVERSATION_FONT_SIZE,
@@ -373,6 +379,8 @@ export function loadSettings(): PersistedSettings {
     merged.chatFontSize = normalizeTextSize(merged.chatFontSize, DEFAULT_CONVERSATION_FONT_SIZE);
     merged.chatLineHeight = normalizeTextLineHeight(merged.chatLineHeight);
     merged.termLineHeight = normalizeTextLineHeight(merged.termLineHeight);
+    merged.uiFontWeight = normalizeTextFontWeight(merged.uiFontWeight);
+    merged.termFontWeight = normalizeTextFontWeight(merged.termFontWeight);
     if (
       !parsed.chatModelByKind ||
       typeof parsed.chatModelByKind !== "object" ||
@@ -448,6 +456,7 @@ export const visualOf = (s: PersistedSettings): VisualSettings => ({
   navLayout: s.navLayout,
   uiFontFamily: s.uiFontFamily,
   uiFontSize: s.uiFontSize,
+  uiFontWeight: s.uiFontWeight,
   chatFontFamily: s.chatFontFamily,
   chatFontSize: s.chatFontSize,
   chatLineHeight: s.chatLineHeight,

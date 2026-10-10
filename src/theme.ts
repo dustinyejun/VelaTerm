@@ -32,6 +32,14 @@ export type NavLayout = "tree" | "compact";
 /** Active tab in the right-side Inspector. */
 export type InspectorTab = "files" | "info" | "git" | "knowledge";
 
+/** Real font weights shared by CSS and xterm's DOM/Canvas renderers. */
+export type TextFontWeight = 400 | 500 | 600 | 700;
+export const DEFAULT_TEXT_FONT_WEIGHT: TextFontWeight = 400;
+export function normalizeTextFontWeight(value: unknown): TextFontWeight {
+  return value === 400 || value === 500 || value === 600 || value === 700
+    ? value : DEFAULT_TEXT_FONT_WEIGHT;
+}
+
 /** Vlinx visual settings: design tokens beyond the color scheme. */
 export interface VisualSettings {
   darkStyle: DarkStyle;
@@ -44,6 +52,7 @@ export interface VisualSettings {
   uiFontFamily: string | null;
   /** UI font size in pixels. null follows density without an inline --ui-fs; a value overrides the density size inline. */
   uiFontSize: number | null;
+  uiFontWeight: TextFontWeight;
   chatFontFamily: string | null;
   chatFontSize: number;
   chatLineHeight: number;
@@ -275,6 +284,7 @@ export function applyVisual(s: VisualSettings) {
   else root.style.removeProperty("--font-mono");
   if (s.uiFontSize != null) root.style.setProperty("--ui-fs", `${s.uiFontSize}px`);
   else root.style.removeProperty("--ui-fs");
+  root.style.setProperty("--ui-font-weight", `${normalizeTextFontWeight(s.uiFontWeight)}`);
   applyConversationTypography(s);
 }
 
