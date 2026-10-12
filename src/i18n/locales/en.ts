@@ -3,7 +3,7 @@
 
 const en = {
   "panel.averageOutput": "average output",
-  "panel.averageOutputHint": "Estimated output tokens per second over measured response time, including reported reasoning. Excludes tool execution and user waits. Unavailable when usage and timing cannot be matched reliably. This is not pure model decoding speed.",
+  "panel.averageOutputHint": "Estimated output tokens per second over measured response time, including reported reasoning. Terminal sessions use native API/response durations when available, or recording timestamps with recorded tool and user-input waits excluded. Unavailable when usage and timing cannot be matched reliably. This is not pure model decoding speed.",
   "tree.newPlanExecuteSession": "New Plan/Execute Session…",
   "launch.splitTasks": "Automatically split into multiple tasks",
   "launch.splitTasksHint": "The planner proposes independent tasks. Review their instructions, agents, models and reasoning effort before execution starts.",

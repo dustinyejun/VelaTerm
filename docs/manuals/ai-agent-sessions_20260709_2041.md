@@ -130,8 +130,18 @@ With an agent session open, the Info tab of the right panel shows:
 
 - **Agent**: the agent type, session name, working directory, Git branch, start time and uptime. For Kiro sessions it also links to a read-only view of the conversation history.
 - **Usage** (Claude, Codex, Grok Build): account quota usage, for example the five-hour and seven-day windows, with their reset times. The ↻ button refreshes immediately. Automatic refresh and its interval are set in Settings ▸ Behavior ("Usage auto-refresh", "Usage refresh"). When a refresh fails, the last values stay visible with a "stale" mark.
-- **This turn** (Claude, Codex, Grok Build, OpenCode, Pi, OMP, Kiro): the model, how full the context window is, and the current turn's token counts and tools.
+- **This turn** (Claude, Codex, Grok Build, OpenCode, Pi, OMP, Kiro, Antigravity): the model, how full the context window is, and the current turn's token counts and tools.
 - **Resources**: CPU and memory of the session's processes; the "system" option adds figures for the whole computer.
+
+**Average output** is estimated output tokens per second, including reasoning when reported, rather
+than pure model decoding speed. Claude Code and Codex terminal sessions use timestamps in their own
+recordings and exclude recorded tool waits (including approval or user-input waits inside those calls).
+Pi uses its recorded response duration, Grok Build uses per-turn model API time (available after the
+turn completes), and Antigravity uses first-token plus streaming duration from its native conversation
+database. These measurements exclude tool execution and time between user messages. Older recordings
+without native timing remain unavailable. Reopening Info or restarting VelaTerm does not add idle time.
+Missing timestamps, unmatched tool boundaries, overlapping generation, or context compaction can leave
+the estimate unavailable (`—`).
 
 ## 9. Transcripts, export and archiving
 

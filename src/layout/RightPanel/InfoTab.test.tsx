@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { InfoTab } from "./InfoTab";
 import { useTermStore } from "../../store/termStore";
 import type { Session } from "../../types";
+import { agentTurnStats } from "../../ipc/commands";
 
 vi.mock("../../ipc/commands", () => ({
   agentContextInfo: vi.fn().mockResolvedValue(null),
@@ -37,6 +38,12 @@ const session = {
 } as unknown as Session;
 
 describe("InfoTab sections", () => {
+  it.each(["pi", "grok", "antigravity"] as const)("shows %s native output speed in terminal mode", async (kind) => {
+    vi.mocked(agentTurnStats).mockResolvedValueOnce({ tokens: 200, inputTokens: 900, totalTokens: 1100, generationTokensPerSecond: 50 } as Awaited<ReturnType<typeof agentTurnStats>>);
+    render(<InfoTab session={{ ...session, kind, engine: "tui", agentSessionId: "native-id" }} cwd="/tmp" />);
+    expect(await screen.findByText("50.0 tok/s")).toBeTruthy();
+    expect(screen.getByText("average output")).toBeTruthy();
+  });
   it("displays Kiro's reported model and percentage without inventing token usage", async () => {
     render(<InfoTab session={{ ...session, kind: "kiro", agentSessionId: "native-id" }} cwd="/tmp" />);
     expect(await screen.findByText("Kiro model")).toBeTruthy();

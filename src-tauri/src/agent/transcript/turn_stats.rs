@@ -14,6 +14,11 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
+mod timing;
+mod grok;
+mod antigravity;
+use timing::RecordedTiming;
+
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnStats {
@@ -123,6 +128,7 @@ struct Accounting {
     native_turn_usage: bool,
     has_turn: bool,
     line_number: u64,
+    timing: RecordedTiming,
 }
 impl Accounting {
     fn start(&mut self) {
@@ -134,6 +140,7 @@ impl Accounting {
         self.pending_files.clear();
         self.files.clear();
         self.has_turn = true;
+        self.timing = RecordedTiming::default();
     }
     fn consume(&mut self, line: &str, kind: SessionKind) {
         self.line_number += 1;
@@ -152,6 +159,10 @@ impl Accounting {
         }
         if super::parse_claude_line(line).is_some_and(|p| p.role == "user") {
             self.start();
+            self.timing.start(v);
+        }
+        if v.get("subtype").and_then(Value::as_str) == Some("compact_boundary") {
+            self.timing.invalidate();
         }
         let Some(message) = v.get("message") else {
             return;
@@ -166,6 +177,7 @@ impl Accounting {
                     .get("tool_use_id")
                     .and_then(Value::as_str)
                     .unwrap_or("");
+                self.timing.finish_tool(id, v);
                 if let Some(paths) = self.pending_files.remove(id) {
                     if block.get("is_error").and_then(Value::as_bool) != Some(true) {
                         self.files.extend(paths);
@@ -197,6 +209,7 @@ impl Accounting {
                 }
             }
             self.turn = Some(turn);
+            self.timing.output(turn.output, v, true);
         }
         for (index, block) in blocks.into_iter().flatten().enumerate() {
             if block.get("type").and_then(Value::as_str) != Some("tool_use") {
@@ -207,6 +220,7 @@ impl Accounting {
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("{id}-{index}"));
+            self.timing.start_tool(block.get("id").and_then(Value::as_str).unwrap_or(""), v);
             if !self.tools.insert(call_id.clone()) {
                 continue;
             }
@@ -219,6 +233,9 @@ impl Accounting {
         }
     }
     fn codex(&mut self, v: &Value, line: &str) {
+        if v.get("type").and_then(Value::as_str) == Some("compacted") {
+            self.timing.invalidate();
+        }
         let Some(p) = v.get("payload") else { return };
         let row_type = v.get("type").and_then(Value::as_str).unwrap_or("");
         let kind = p.get("type").and_then(Value::as_str).unwrap_or("");
@@ -226,6 +243,7 @@ impl Accounting {
             let id = p.get("turn_id").and_then(Value::as_str);
             if id.is_none() || self.native_turn.as_deref() != id {
                 self.start();
+                self.timing.start(v);
                 self.native_turn = Some(
                     id.map(str::to_string)
                         .unwrap_or_else(|| format!("legacy-{}", self.line_number)),
@@ -235,8 +253,14 @@ impl Accounting {
             && super::parse_codex_line(line).is_some_and(|p| p.role == "user")
         {
             self.start();
+            self.timing.start(v);
         }
         if row_type == "token_usage_record" {
+            // Ignore delayed usage from another turn rather than pairing it with this turn's clock.
+            if p.get("turn_id").and_then(Value::as_str)
+                .zip(self.native_turn.as_deref()).is_some_and(|(id, current)| id != current) {
+                return;
+            }
             if let Some(usage) = p
                 .get("thread_token_usage")
                 .and_then(|u| Usage::parse(u, false))
@@ -249,6 +273,7 @@ impl Accounting {
             {
                 self.turn = Some(usage);
                 self.native_turn_usage = true;
+                self.timing.output(usage.output, v, false);
             }
         }
         if row_type == "event_msg" && kind == "token_count" {
@@ -263,7 +288,9 @@ impl Accounting {
                     .filter(|b| b.input <= usage.input && b.output <= usage.output)
                     .unwrap_or_default();
                 if !self.native_turn_usage {
-                    self.turn = Some(usage.difference(base));
+                    let turn = usage.difference(base);
+                    self.turn = Some(turn);
+                    self.timing.output(turn.output, v, false);
                 }
             }
         }
@@ -280,6 +307,8 @@ impl Accounting {
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("line-{}", self.line_number));
+            self.timing.start_tool(p.get("call_id").or_else(|| p.get("id"))
+                .and_then(Value::as_str).unwrap_or(""), v);
             if !self.tools.insert(id.clone()) {
                 return;
             }
@@ -298,8 +327,9 @@ impl Accounting {
                 self.pending_files.insert(id, patch_paths(patch));
             }
         }
-        if matches!(kind, "function_call_output" | "custom_tool_call_output") {
+        if matches!(kind, "function_call_output" | "custom_tool_call_output" | "local_shell_call_output" | "web_search_call_output") {
             let id = p.get("call_id").and_then(Value::as_str).unwrap_or("");
+            self.timing.finish_tool(id, v);
             if let Some(paths) = self.pending_files.remove(id) {
                 let output = p.get("output").and_then(Value::as_str).unwrap_or("");
                 if output.contains("Success. Updated the following files:")
@@ -324,6 +354,7 @@ impl Accounting {
             session_tokens: self.session.map(Usage::total),
             tools_used: self.has_turn.then_some(self.tools.len() as u32),
             files_touched: self.has_turn.then_some(self.files.len() as u32),
+            generation_tokens_per_second: self.timing.rate(),
             ..TurnStats::default()
         }
     }
@@ -478,12 +509,11 @@ fn pi_usage(usage: &Value) -> Option<Usage> {
     })
 }
 
-/// OMP stamps each assistant message with the wall-clock milliseconds its stream took; that is the same
-/// window Claude's message_start/message_stop measures, so the two rates stay comparable. Upstream Pi
-/// records no timing at all, which leaves the rate to the live engine while the process runs.
+/// Native model-request durations, excluding tools and time between user messages.
+/// Pi uses `durationMs`; older OMP recordings use `duration` (also milliseconds).
 fn pi_step_ms(message: &Value) -> Option<u64> {
-    let ms = message.get("duration").and_then(Value::as_f64)?;
-    (ms > 0.0).then_some(ms as u64)
+    let ms = message.get("durationMs").or_else(|| message.get("duration"))?.as_f64()?;
+    (ms.is_finite() && ms >= 1.0 && ms < u64::MAX as f64).then_some(ms as u64)
 }
 
 /// The file-editing tools Pi and OMP expose. Both write through lowercase `edit` and `write`; OMP adds the
@@ -506,8 +536,7 @@ struct PiAccounting {
     files: HashSet<String>,
     session: Option<Usage>,
     turn: Option<Usage>,
-    generated_ms: u64,
-    generated_tokens: u64,
+    timings: HashMap<String, (u64, u64)>,
     has_turn: bool,
     /// Id of the last entry consumed, which the next appended entry has to name as its parent.
     tail: Option<String>,
@@ -519,8 +548,7 @@ impl PiAccounting {
         self.tools.clear();
         self.pending_files.clear();
         self.files.clear();
-        self.generated_ms = 0;
-        self.generated_tokens = 0;
+        self.timings.clear();
         self.has_turn = true;
     }
     fn consume(&mut self, entry: &Value) {
@@ -558,9 +586,9 @@ impl PiAccounting {
                     }
                 }
                 self.turn = Some(turn);
+                self.timings.remove(id);
                 if let Some(ms) = pi_step_ms(message).filter(|_| usage.output > 0) {
-                    self.generated_ms = self.generated_ms.saturating_add(ms);
-                    self.generated_tokens = self.generated_tokens.saturating_add(usage.output);
+                    self.timings.insert(id.to_string(), (ms, usage.output));
                 }
             }
         }
@@ -599,6 +627,7 @@ impl PiAccounting {
     }
     fn snapshot(&self) -> TurnStats {
         let turn = self.turn;
+        let (generated_ms, generated_tokens) = self.timings.values().fold((0u64, 0u64), |(ms, tokens), (m, t)| (ms.saturating_add(*m), tokens.saturating_add(*t)));
         TurnStats {
             tokens: turn.map(|u| u.output),
             input_tokens: turn.map(|u| u.input),
@@ -610,8 +639,8 @@ impl PiAccounting {
             session_tokens: self.session.map(Usage::total),
             tools_used: self.has_turn.then_some(self.tools.len() as u32),
             files_touched: self.has_turn.then_some(self.files.len() as u32),
-            generation_tokens_per_second: (self.generated_ms > 0 && self.generated_tokens > 0)
-                .then(|| self.generated_tokens as f64 * 1000.0 / self.generated_ms as f64),
+            generation_tokens_per_second: (generated_ms > 0 && generated_tokens > 0)
+                .then(|| generated_tokens as f64 * 1000.0 / generated_ms as f64),
             ..TurnStats::default()
         }
     }
@@ -717,6 +746,8 @@ pub fn current_turn_stats(kind: SessionKind, agent_session_id: &str) -> Result<T
     if matches!(kind, SessionKind::Pi | SessionKind::Omp) {
         return pi_stats_from_file(kind, agent_session_id);
     }
+    if kind == SessionKind::Grok { return grok::stats(agent_session_id); }
+    if kind == SessionKind::Antigravity { return antigravity::stats(agent_session_id); }
     if !matches!(kind, SessionKind::Claude | SessionKind::Codex) {
         return Ok(TurnStats::default());
     }
@@ -916,6 +947,199 @@ mod tests {
         assert_eq!(accounting.snapshot().files_touched, Some(0));
         accounting.consume(&json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c","output":"Success. Updated the following files:\nM a.ts\nA b.ts"}}).to_string(), SessionKind::Codex);
         assert_eq!(accounting.snapshot().files_touched, Some(2));
+    }
+    fn stamp(mut row: Value, seconds: u32) -> Value {
+        row["timestamp"] = json!(format!("2026-10-10T09:{:02}:{:02}.000Z", seconds / 60, seconds % 60));
+        row
+    }
+    fn claude_usage(id: &str, output: u64, content: Value) -> Value {
+        json!({"type":"assistant","message":{"id":id,"usage":{"input_tokens":100,"output_tokens":output},"content":content}})
+    }
+    fn codex_usage(turn: &str, output: u64) -> Value {
+        json!({"type":"token_usage_record","payload":{"turn_id":turn,
+            "turn_token_usage":{"input_tokens":100,"output_tokens":output},
+            "thread_token_usage":{"input_tokens":100,"output_tokens":output}}})
+    }
+    #[test]
+    fn claude_recorded_rate_deduplicates_blocks_and_excludes_parallel_tool_waits() {
+        let text = lines(vec![
+            stamp(json!({"type":"user","message":{"content":"go"}}), 0),
+            stamp(claude_usage("a", 120, json!([{"type":"thinking","thinking":"plan"}])), 1),
+            stamp(claude_usage("a", 120, json!([{"type":"tool_use","id":"one","name":"Bash"},{"type":"tool_use","id":"two","name":"Read"}])), 2),
+            stamp(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"one"}]}}), 12),
+            stamp(json!({"type":"assistant","isSidechain":true,"message":{"id":"child","usage":{"input_tokens":1000,"output_tokens":1000}}}), 15),
+            stamp(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"two"}]}}), 22),
+            stamp(claude_usage("b", 120, json!([{"type":"text","text":"done"}])), 24),
+        ]);
+        let stats = parse(&text, SessionKind::Claude);
+        assert_eq!(stats.tokens, Some(240));
+        assert_eq!(stats.generation_tokens_per_second, Some(60.0));
+    }
+    #[test]
+    fn codex_recorded_rate_pairs_native_usage_and_excludes_tool_and_approval_waits() {
+        let text = lines(vec![
+            stamp(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}), 0),
+            stamp(json!({"type":"response_item","payload":{"type":"function_call","call_id":"tool","name":"shell"}}), 2),
+            stamp(codex_usage("a", 120), 3),
+            // Duplicate usage and legacy snapshots must not extend the measured response.
+            stamp(codex_usage("a", 120), 10),
+            stamp(json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":120}}}}), 12),
+            stamp(json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"tool","output":"done"}}), 22),
+            stamp(codex_usage("other-turn", 10000), 23),
+            stamp(codex_usage("a", 240), 24),
+            stamp(json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"a"}}), 50),
+        ]);
+        let stats = parse(&text, SessionKind::Codex);
+        assert_eq!(stats.tokens, Some(240));
+        assert_eq!(stats.generation_tokens_per_second, Some(60.0));
+    }
+    #[test]
+    fn codex_recorded_rate_handles_legacy_usage_without_double_counting_reasoning() {
+        let count = |output| json!({"type":"event_msg","payload":{"type":"token_count","info":{
+            "total_token_usage":{"input_tokens":100,"output_tokens":output,"reasoning_output_tokens":40}}}});
+        let stats = parse(&lines(vec![
+            stamp(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}), 0),
+            stamp(count(120), 2),
+            stamp(count(120), 12),
+            stamp(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"b"}}), 20),
+            stamp(count(240), 22),
+        ]), SessionKind::Codex);
+        assert_eq!(stats.tokens, Some(120));
+        assert_eq!(stats.generation_tokens_per_second, Some(60.0));
+    }
+    #[test]
+    fn recorded_rate_stays_unknown_for_missing_invalid_or_reversed_timestamps() {
+        for timestamp in [Value::Null, json!("bad"), json!("2026-02-30T09:00:02Z"), json!("2026-10-10T08:59:59Z")] {
+            let mut response = claude_usage("a", 120, json!([]));
+            response["timestamp"] = timestamp;
+            let stats = parse(&lines(vec![
+                stamp(json!({"type":"user","message":{"content":"go"}}), 0), response,
+            ]), SessionKind::Claude);
+            assert_eq!(stats.tokens, Some(120));
+            assert_eq!(stats.generation_tokens_per_second, None);
+        }
+        let stats = parse(&lines(vec![stamp(claude_usage("a", 120, json!([])), 2)]), SessionKind::Claude);
+        assert_eq!(stats.generation_tokens_per_second, None);
+        // A tool result must not accidentally create a clock when the prompt/start row is missing.
+        let stats = parse(&lines(vec![
+            stamp(json!({"type":"response_item","payload":{"type":"function_call","call_id":"tool","name":"shell"}}), 2),
+            stamp(json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"tool"}}), 22),
+            stamp(codex_usage("a", 120), 24),
+        ]), SessionKind::Codex);
+        assert_eq!(stats.generation_tokens_per_second, None);
+    }
+    #[test]
+    fn recorded_rate_rejects_missing_tool_completion_overlapping_generation_and_compaction() {
+        for fault in ["missing-completion", "orphan-result", "compaction"] {
+            let mut rows = vec![
+                stamp(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}), 0),
+                stamp(json!({"type":"response_item","payload":{"type":"function_call","call_id":"tool","name":"shell"}}), 2),
+                stamp(codex_usage("a", 120), 3),
+            ];
+            if fault == "orphan-result" {
+                rows.push(stamp(json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"unknown"}}), 12));
+            } else if fault == "compaction" {
+                rows.push(stamp(json!({"type":"compacted","payload":{}}), 12));
+            }
+            rows.push(stamp(codex_usage("a", 240), 24));
+            assert_eq!(parse(&lines(rows), SessionKind::Codex).generation_tokens_per_second, None);
+        }
+    }
+    #[test]
+    fn recorded_rate_resets_at_a_new_prompt_and_understands_timezones() {
+        let mut first = claude_usage("a", 120, json!([]));
+        first["timestamp"] = json!("2026-10-10T17:00:02+08:00");
+        let mut accounting = Accounting::default();
+        for row in [stamp(json!({"type":"user","message":{"content":"first"}}), 0), first] {
+            accounting.consume(&row.to_string(), SessionKind::Claude);
+        }
+        assert_eq!(accounting.snapshot().generation_tokens_per_second, Some(60.0));
+        accounting.consume(&stamp(json!({"type":"user","message":{"content":"next"}}), 30).to_string(), SessionKind::Claude);
+        assert_eq!(accounting.snapshot().generation_tokens_per_second, None);
+        accounting.consume(&stamp(claude_usage("b", 60, json!([])), 32).to_string(), SessionKind::Claude);
+        assert_eq!(accounting.snapshot().generation_tokens_per_second, Some(30.0));
+    }
+    #[test]
+    fn recorded_rate_survives_incremental_reads_partial_lines_and_reader_restart() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("velaterm-turn-timing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("transcript.jsonl");
+        let start = stamp(json!({"type":"user","message":{"content":"go"}}), 0);
+        std::fs::write(&path, format!("{start}\n")).unwrap();
+        let mut entry = Cached { path: path.clone(), ..Cached::default() };
+        assert_eq!(read_cached(&mut entry, SessionKind::Claude).unwrap().generation_tokens_per_second, None);
+        let response = stamp(claude_usage("a", 120, json!([])), 2).to_string();
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(file, "{response}").unwrap();
+        assert_eq!(read_cached(&mut entry, SessionKind::Claude).unwrap().generation_tokens_per_second, None);
+        writeln!(file).unwrap();
+        assert_eq!(read_cached(&mut entry, SessionKind::Claude).unwrap().generation_tokens_per_second, Some(60.0));
+        assert_eq!(read_cached(&mut entry, SessionKind::Claude).unwrap().generation_tokens_per_second, Some(60.0));
+        let mut restarted = Cached { path, ..Cached::default() };
+        assert_eq!(read_cached(&mut restarted, SessionKind::Claude).unwrap().generation_tokens_per_second, Some(60.0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn pi_native_duration_updates_are_deduplicated_and_reset() {
+        let mut accounting = PiAccounting::default();
+        accounting.start();
+        let message = json!({"role":"assistant","usage":{"input":100,"output":200,"cacheRead":800,"reasoning":150},"durationMs":4000});
+        accounting.assistant("one", &message);
+        accounting.assistant("one", &message);
+        assert_eq!(accounting.snapshot().generation_tokens_per_second, Some(50.0));
+        accounting.assistant("two", &json!({"usage":{"input":50,"output":100},"duration":6000}));
+        assert_eq!(accounting.snapshot().generation_tokens_per_second, Some(30.0));
+        assert_eq!(accounting.snapshot().tokens, Some(300));
+        accounting.assistant("two", &json!({"usage":{"input":50,"output":100}}));
+        assert_eq!(accounting.snapshot().generation_tokens_per_second, Some(50.0));
+        accounting.start();
+        assert_eq!(accounting.snapshot().generation_tokens_per_second, None);
+        assert_eq!(pi_step_ms(&json!({"durationMs":-1})), None);
+        assert_eq!(pi_step_ms(&json!({"durationMs":0})), None);
+    }
+    /// Full native recording -> session database -> Info command -> frontend JSON contract. Read-only
+    /// provider samples are selected explicitly; only numeric statistics are retained in the report.
+    #[test]
+    #[ignore = "requires explicitly selected local agent recordings"]
+    fn tui_turn_stats_end_to_end() {
+        let output = PathBuf::from(std::env::var("VLX_TUI_STATS_OUTPUT_DIR").unwrap());
+        std::fs::create_dir_all(&output).unwrap();
+        let db = crate::db::Db::open(&output.join(format!("app-{}.db", uuid::Uuid::new_v4()))).unwrap();
+        let ctx = crate::host::AppCtx::Headless(std::sync::Arc::new(crate::host::HeadlessHost::new(output.clone(), db)));
+        let mut reports = Vec::new();
+        for (kind, variable) in [(SessionKind::Claude, "VLX_TUI_STATS_CLAUDE_ID"), (SessionKind::Codex, "VLX_TUI_STATS_CODEX_ID"), (SessionKind::Pi, "VLX_TUI_STATS_PI_ID"), (SessionKind::Grok, "VLX_TUI_STATS_GROK_ID"), (SessionKind::Antigravity, "VLX_TUI_STATS_ANTIGRAVITY_ID")] {
+            let agent_id = std::env::var(variable).unwrap();
+            let path = match kind {
+                SessionKind::Claude => resume::find_claude_transcript(&agent_id),
+                SessionKind::Codex => resume::find_codex_rollout(&agent_id),
+                SessionKind::Pi => resume::find_pi_session(kind, &agent_id),
+                SessionKind::Grok => resume::find_grok_updates(&agent_id),
+                SessionKind::Antigravity => antigravity::path(&agent_id),
+                _ => unreachable!(),
+            }.unwrap();
+            let before = std::fs::read(&path).unwrap();
+            let local_id = {
+                let conn = ctx.db().conn.lock().unwrap();
+                let project = crate::db::repo::create_virtual_project(&conn, &format!("{} TUI output-speed validation", kind.as_str())).unwrap();
+                let session = crate::db::repo::create_session(&conn, &project.id, None, "Read-only sample", kind, None, None, None, None, None).unwrap();
+                assert_eq!(session.engine, "tui");
+                crate::db::repo::set_agent_session_id(&conn, &session.id, &agent_id, kind).unwrap();
+                session.id
+            };
+            let stats = crate::command_core::agent_turn_stats(&ctx, &local_id).unwrap();
+            let rate = stats.generation_tokens_per_second.expect("An audited recording must provide a measured rate");
+            assert!(rate.is_finite() && rate > 0.0);
+            assert!(stats.tokens.is_some_and(|tokens| tokens > 0));
+            let json = serde_json::to_value(&stats).unwrap();
+            assert_eq!(json["generationTokensPerSecond"].as_f64(), Some(rate));
+            let again = crate::command_core::agent_turn_stats(&ctx, &local_id).unwrap();
+            assert_eq!(again.generation_tokens_per_second, Some(rate), "Opening Info later must not add idle/read time");
+            assert_eq!(std::fs::read(&path).unwrap(), before, "Provider history must stay untouched");
+            reports.push(json!({"kind":kind.as_str(),"engine":"tui","agentSessionId":agent_id,"stats":json,"repeatedReadStable":true,"sourceUnchanged":true}));
+            println!("{} TUI Info: output={} rate={rate:.3} tok/s; repeated read stable; source unchanged", kind.as_str(), stats.tokens.unwrap());
+        }
+        std::fs::write(output.join("results.json"), serde_json::to_string_pretty(&json!({"command":"rtk proxy cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features tui_turn_stats_end_to_end -- --ignored --nocapture","sessions":reports})).unwrap()).unwrap();
     }
     #[test]
     fn missing_usage_and_zero_input_have_no_invented_ratios() {

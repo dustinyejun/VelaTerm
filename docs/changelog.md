@@ -13,7 +13,7 @@ v0.1.91 is the first public release; earlier version numbers were internal itera
 - ⛔ AI title generation can be cancelled with Cancel, Esc, or a click outside the dialog, and you can try again afterwards.
 - 🧭 New Plan/Execute workflows have independent Review turned off by default; enable it in the launch dialog or with `--review` when needed.
 - 🤖 The Chat model selector shows loading, error, and empty states with Retry, and Codex model choices reflect the current session's account and configuration.
-- 📊 The Info panel shows an estimate of average output speed, including reported reasoning tokens, and displays a dash when the estimate is unavailable.
+- 📊 The Info panel shows estimated average output speed, including reported reasoning tokens. Claude Code and Codex terminal sessions also estimate it from their recordings, excluding recorded tool waits; Pi, Grok Build and Antigravity terminal sessions read native response or API durations. Unreliable estimates display a dash.
 - 🩺 Advanced settings offer optional input latency diagnostics with an adjustable threshold, without recording the text you type.
 - ✂️ The experimental screenshot tool has a title bar button on supported Tauri desktop platforms, even when its keyboard shortcut is disabled.
 - 🌬️ Cyan background-task indicators use a consistent breathing animation in the session tree, status filters, and status bar.

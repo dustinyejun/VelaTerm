@@ -569,7 +569,7 @@ export function InfoTab({ session, cwd }: { session: Session; cwd: string | null
   const isGrok = session.kind === "grok";
   const isOpencode = session.kind === "opencode";
   const isPi = session.kind === "pi" || session.kind === "omp";
-  const hasContext = isClaude || isCodex || isGrok || isOpencode || isPi || session.kind === "kiro";
+  const hasContext = isClaude || isCodex || isGrok || isOpencode || isPi || session.kind === "kiro" || session.kind === "antigravity";
 
   const agentState = runtime?.agentState;
   const currentTool = runtime?.currentTool;

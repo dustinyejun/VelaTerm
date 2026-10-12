@@ -4,7 +4,7 @@ import type en from "./en";
 
 const zhCN: typeof en = {
   "panel.averageOutput": "平均输出速度",
-  "panel.averageOutputHint": "按测得的响应耗时估算每秒输出的 token 数，包含智能体报告的推理 token，不计工具执行和等待用户的时间。无法可靠匹配用量与计时时不显示数值。此指标并非模型的纯解码速度。",
+  "panel.averageOutputHint": "按测得的响应耗时估算每秒输出的 token 数，包含智能体报告的推理 token。终端模式优先使用原生 API 或响应耗时，也可根据记录的时间戳估算并扣除已记录的工具执行和等待用户输入时间。无法可靠匹配用量与计时时不显示数值。此指标并非模型的纯解码速度。",
   "tree.newPlanExecuteSession": "新建规划/执行会话…",
   "launch.splitTasks": "自动拆分多个任务",
   "launch.splitTasksHint": "由规划会话拆分独立任务；执行前可逐项确认任务说明、智能体、模型和推理强度。",

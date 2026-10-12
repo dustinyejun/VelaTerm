@@ -96,7 +96,7 @@ portable-pty = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 # Server audit-log timestamps use local `yyyy-MM-dd HH:mm:ss` date and time.
-time = { version = "0.3", features = ["local-offset"] }
+time = { version = "0.3", features = ["local-offset", "parsing"] }
 # Lightweight loopback HTTP service receiving official agent hooks and Codex notify callbacks.
 tiny_http = "0.12"
 
