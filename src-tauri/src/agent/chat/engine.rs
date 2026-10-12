@@ -2518,10 +2518,16 @@ impl ChatManager {
     pub fn enrich_turn_stats(&self, session_id: &str, stats: &mut crate::agent::transcript::TurnStats) {
         let proc = self.sessions.lock().unwrap().get(session_id).cloned();
         if let Some(proc) = proc {
-            // Only a measured live stream overrides the value the recording already produced; an idle
-            // process must not clear a rate the store can still provide (OpenCode computes its own).
-            if let Some(rate) = proc.extras.lock().unwrap().generation.rate() {
-                stats.generation_tokens_per_second = Some(rate);
+            let extras = proc.extras.lock().unwrap();
+            // 原生请求耗时优先；实时窗口只有与本轮完整用量一致时才作为流式吞吐率。
+            if stats.generation_tokens_per_second.is_none() {
+                if let Some(rate) = extras.generation.rate_for_output(stats.tokens) {
+                    stats.generation_tokens_per_second = Some(rate);
+                    stats.output_throughput_basis = Some(crate::agent::transcript::ThroughputBasis::Stream);
+                }
+            }
+            if let Some(rate) = extras.generation.estimated_rate() {
+                stats.estimated_output_tokens_per_second = Some(rate);
             }
         }
     }

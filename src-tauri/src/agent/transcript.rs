@@ -168,24 +168,25 @@ fn grok_context_info(agent_session_id: &str) -> Result<AgentContextInfo, String>
 /// OpenCode does not record the model's context window, so `context_limit` stays zero: the panel shows
 /// the used count and leaves the overflow meter off rather than guessing a capacity.
 fn opencode_context_info(session_id: &str) -> Result<AgentContextInfo, String> {
-    let messages = crate::agent::opencode_store::messages(session_id)?;
+    opencode_context_from_messages(&crate::agent::opencode_store::messages(session_id)?)
+}
+
+fn opencode_context_from_messages(messages: &[crate::agent::opencode_store::OpencodeMessage]) -> Result<AgentContextInfo, String> {
+    let input_size = |info: &Value| {
+        let input = info.pointer("/tokens/input")?.as_u64()?;
+        let read = info.pointer("/tokens/cache/read").and_then(Value::as_u64).unwrap_or(0);
+        let write = info.pointer("/tokens/cache/write").and_then(Value::as_u64).unwrap_or(0);
+        Some(input.saturating_add(read).saturating_add(write))
+    };
     let last = messages
         .iter()
         .rev()
         .find(|m| {
             m.info.get("role").and_then(Value::as_str) == Some("assistant")
-                && m.info
-                    .pointer("/tokens/total")
-                    .and_then(Value::as_u64)
-                    .is_some_and(|n| n > 0)
+                && input_size(&m.info).is_some_and(|n| n > 0)
         })
         .ok_or("OpenCode session has no recorded usage yet")?;
-    let context_tokens = last.info.get("tokens").and_then(|tokens| {
-        let input = tokens.get("input").and_then(Value::as_u64).unwrap_or(0);
-        let read = tokens.pointer("/cache/read").and_then(Value::as_u64).unwrap_or(0);
-        let write = tokens.pointer("/cache/write").and_then(Value::as_u64).unwrap_or(0);
-        (input + read + write > 0).then_some(input + read + write)
-    });
+    let context_tokens = input_size(&last.info);
     let model = last
         .info
         .get("modelID")
@@ -386,7 +387,7 @@ fn widen_to_usage(limit: u64, tokens: Option<u64>) -> u64 {
 }
 
 mod turn_stats;
-pub use turn_stats::{current_turn_stats, TurnStats};
+pub use turn_stats::{current_turn_stats, ThroughputBasis, TurnStats};
 #[cfg(test)]
 use turn_stats::turn_stats_from_text;
 
@@ -1290,6 +1291,21 @@ fn parse_codex_line(line: &str) -> Option<Piece> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_context_accepts_usage_without_total_and_skips_empty_snapshots() {
+        use crate::agent::opencode_store::OpencodeMessage;
+        let messages = vec![
+            OpencodeMessage { info: serde_json::json!({"role":"assistant","modelID":"model-a",
+                "tokens":{"input":100,"output":50,"cache":{"read":800,"write":100}}}), parts: vec![] },
+            OpencodeMessage { info: serde_json::json!({"role":"assistant",
+                "tokens":{"input":0,"output":0}}), parts: vec![] },
+        ];
+        let context = opencode_context_from_messages(&messages).unwrap();
+        assert_eq!(context.model.as_deref(), Some("model-a"));
+        assert_eq!(context.context_tokens, Some(1000));
+        assert_eq!(context.context_limit, 0);
+    }
 
     #[test]
     fn reset_credit_count_is_authoritative_and_optional() {

@@ -64,6 +64,7 @@ impl Accounting {
                     output,
                     cached: cached.unwrap_or(0),
                     cache_known: cached.is_some(),
+                    reasoning: usage["reasoningTokens"].as_u64().filter(|count| *count <= output),
                 };
                 if self.completed.insert(id.to_string(), value).is_some() {
                     return;
@@ -89,7 +90,7 @@ impl Accounting {
             input_tokens: turn.map(|u| u.input),
             total_tokens: turn.map(Usage::total),
             cached_tokens: turn
-                .filter(|u| u.cache_known && u.cached > 0)
+                .filter(|u| u.cache_known)
                 .map(|u| u.cached),
             cache_hit_percent: turn
                 .filter(|u| u.cache_known && u.input > 0 && u.cached <= u.input)
@@ -97,6 +98,8 @@ impl Accounting {
             session_tokens: (!self.completed.is_empty()).then_some(session),
             tools_used: Some(self.tools.len() as u32),
             generation_tokens_per_second: self.rate,
+            output_throughput_basis: self.rate.map(|_| ThroughputBasis::Request),
+            reasoning_tokens: turn.and_then(|u| u.reasoning),
             ..TurnStats::default()
         }
     }

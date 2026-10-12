@@ -42,14 +42,14 @@ describe("InfoTab sections", () => {
     vi.mocked(agentTurnStats).mockResolvedValueOnce({ tokens: 200, inputTokens: 900, totalTokens: 1100, generationTokensPerSecond: 50 } as Awaited<ReturnType<typeof agentTurnStats>>);
     render(<InfoTab session={{ ...session, kind, engine: "tui", agentSessionId: "native-id" }} cwd="/tmp" />);
     expect(await screen.findByText("50.0 tok/s")).toBeTruthy();
-    expect(screen.getByText("average output")).toBeTruthy();
+    expect(screen.getByText("output throughput")).toBeTruthy();
   });
   it("displays Kiro's reported model and percentage without inventing token usage", async () => {
     render(<InfoTab session={{ ...session, kind: "kiro", agentSessionId: "native-id" }} cwd="/tmp" />);
     expect(await screen.findByText("Kiro model")).toBeTruthy();
     expect(screen.getByText("37%")).toBeTruthy();
     expect(screen.getByText("— / 200.0k")).toBeTruthy();
-    expect(screen.queryByText("turn tokens")).toBeNull();
+    expect(screen.queryByText("turn usage")).toBeNull();
     expect(screen.queryByText("session total")).toBeNull();
   });
   it("gives every section a collapse button and folds its body away", () => {

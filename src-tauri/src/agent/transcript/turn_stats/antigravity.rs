@@ -91,6 +91,7 @@ fn read(path: &Path) -> Result<TurnStats, String> {
     let mut turn: Option<Usage> = None;
     let mut generated_ms = 0.0;
     let mut generated_tokens = 0u64;
+    let mut timing_complete = true;
     for row in rows {
         let data = row.map_err(|e| e.to_string())?;
         let Some(sample) = sample(&data) else {
@@ -101,23 +102,28 @@ fn read(path: &Path) -> Result<TurnStats, String> {
             !sample.steps.is_empty() && sample.steps.iter().all(|idx| *idx > start)
         }) {
             turn.get_or_insert_with(Usage::default).add(sample.usage);
-            if let Some(ms) = sample.ms.filter(|ms| *ms > 0.0 && sample.usage.output > 0) {
+            if let Some(ms) = sample.ms.filter(|ms| *ms > 0.0 && ms.is_finite()) {
                 generated_ms += ms;
                 generated_tokens = generated_tokens.saturating_add(sample.usage.output);
+            } else {
+                timing_complete = false;
             }
         }
     }
+    let rate = (timing_complete && generated_ms >= 100.0 && generated_tokens > 0)
+        .then(|| generated_tokens as f64 * 1000.0 / generated_ms);
     Ok(TurnStats {
         tokens: turn.map(|u| u.output),
         input_tokens: turn.map(|u| u.input),
         total_tokens: turn.map(Usage::total),
-        cached_tokens: turn.filter(|u| u.cached > 0).map(|u| u.cached),
+        cached_tokens: turn.filter(|u| u.cache_known).map(|u| u.cached),
         cache_hit_percent: turn
-            .filter(|u| u.input > 0 && u.cached <= u.input)
+            .filter(|u| u.cache_known && u.input > 0 && u.cached <= u.input)
             .map(|u| u.cached as f64 * 100.0 / u.input as f64),
         session_tokens: session.map(Usage::total),
-        generation_tokens_per_second: (generated_ms > 0.0 && generated_tokens > 0)
-            .then(|| generated_tokens as f64 * 1000.0 / generated_ms),
+        generation_tokens_per_second: rate,
+        output_throughput_basis: rate.map(|_| ThroughputBasis::Request),
+        reasoning_tokens: turn.and_then(|u| u.reasoning),
         ..TurnStats::default()
     })
 }
@@ -237,11 +243,11 @@ fn sample(data: &[u8]) -> Option<Sample> {
             .saturating_add(integer(&usage, 4)),
         output: integer(&usage, 3),
         cached,
+        // 已知 proto3 schema 的数值字段缺省即为零，不能用 wire 字段存在性判断未知。
         cache_known: true,
+        reasoning: Some(integer(&usage, 9)).filter(|count| *count <= integer(&usage, 3)),
     };
-    if value.total() == 0 {
-        return None;
-    }
+    // 零输出请求也占用模型耗时；保留已报告的零用量，避免只统计有输出的子集。
     // First-token time includes reasoning; streaming duration covers the rest of the response.
     let ms = bytes(&chat, 11)
         .and_then(duration)
@@ -307,6 +313,34 @@ mod tests {
         assert!(duration(&int(2, 1_000_000_000)).is_none());
         assert!(fields(&[255; 12]).is_none());
     }
+    #[test]
+    fn zero_usage_and_missing_timing_remain_part_of_native_request_coverage() {
+        let dir = std::env::temp_dir().join(format!("vlx-agy-coverage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE steps(idx INTEGER,step_type INTEGER); CREATE TABLE gen_metadata(idx INTEGER,data BLOB); INSERT INTO steps VALUES(0,14);").unwrap();
+        conn.execute("INSERT INTO gen_metadata VALUES(0,?1)", [fixture(&[1])]).unwrap();
+        let zero_chat = [blob(4, &[]), blob(11, &int(1, 3)), blob(12, &int(1, 1))].concat();
+        let zero = [blob(1, &zero_chat), int(2, 2)].concat();
+        let usage = sample(&zero).unwrap().usage;
+        assert_eq!(usage.cached, 0);
+        assert!(usage.cache_known);
+        assert_eq!(usage.reasoning, Some(0));
+        conn.execute("INSERT INTO gen_metadata VALUES(1,?1)", [zero]).unwrap();
+        let stats = read(&path).unwrap();
+        assert_eq!(stats.tokens, Some(200));
+        assert_eq!(stats.reasoning_tokens, Some(150));
+        assert_eq!(stats.generation_tokens_per_second, Some(25.0));
+        let missing = [blob(1, &blob(4, &int(3, 100))), int(2, 3)].concat();
+        conn.execute("INSERT INTO gen_metadata VALUES(2,?1)", [missing]).unwrap();
+        let stats = read(&path).unwrap();
+        assert_eq!(stats.tokens, Some(300));
+        assert_eq!(stats.generation_tokens_per_second, None);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn native_database_counts_generators_once_and_reads_live_wal() {
         let dir = std::env::temp_dir().join(format!("vlx-agy-stats-{}", uuid::Uuid::new_v4()));

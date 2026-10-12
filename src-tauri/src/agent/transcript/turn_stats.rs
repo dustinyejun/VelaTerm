@@ -36,8 +36,19 @@ pub struct TurnStats {
     pub context_tokens: Option<u64>,
     pub context_limit: Option<u64>,
     pub context_percent: Option<f64>,
-    /// Estimated output throughput over measured response time, including reported reasoning.
+    /// 与本轮用量完整匹配的模型请求或流式吞吐率。
     pub generation_tokens_per_second: Option<f64>,
+    pub output_throughput_basis: Option<ThroughputBasis>,
+    /// 仅有回合时间戳时的响应估算，不冒充模型请求吞吐率。
+    pub estimated_output_tokens_per_second: Option<f64>,
+    pub reasoning_tokens: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThroughputBasis {
+    Request,
+    Stream,
 }
 impl TurnStats {
     pub fn with_context(&mut self, context: &AgentContextInfo) {
@@ -57,6 +68,7 @@ struct Usage {
     output: u64,
     cached: u64,
     cache_known: bool,
+    reasoning: Option<u64>,
 }
 impl Default for Usage {
     fn default() -> Self {
@@ -65,6 +77,7 @@ impl Default for Usage {
             output: 0,
             cached: 0,
             cache_known: true,
+            reasoning: Some(0),
         }
     }
 }
@@ -93,6 +106,14 @@ impl Usage {
             output,
             cached,
             cache_known: cache_value.is_some(),
+            reasoning: value
+                .pointer(if claude {
+                    "/output_tokens_details/thinking_tokens"
+                } else {
+                    "/reasoning_output_tokens"
+                })
+                .and_then(Value::as_u64)
+                .filter(|count| *count <= output),
         })
     }
     fn total(self) -> u64 {
@@ -103,6 +124,8 @@ impl Usage {
         self.output = self.output.saturating_add(other.output);
         self.cached = self.cached.saturating_add(other.cached);
         self.cache_known &= other.cache_known;
+        self.reasoning = self.reasoning.zip(other.reasoning)
+            .map(|(a, b)| a.saturating_add(b));
     }
     fn difference(self, base: Self) -> Self {
         Self {
@@ -110,6 +133,8 @@ impl Usage {
             output: self.output.saturating_sub(base.output),
             cached: self.cached.saturating_sub(base.cached),
             cache_known: self.cache_known && base.cache_known,
+            reasoning: self.reasoning.zip(base.reasoning)
+                .map(|(a, b)| a.saturating_sub(b)),
         }
     }
 }
@@ -354,7 +379,8 @@ impl Accounting {
             session_tokens: self.session.map(Usage::total),
             tools_used: self.has_turn.then_some(self.tools.len() as u32),
             files_touched: self.has_turn.then_some(self.files.len() as u32),
-            generation_tokens_per_second: self.timing.rate(),
+            estimated_output_tokens_per_second: self.timing.rate(),
+            reasoning_tokens: turn.and_then(|u| u.reasoning),
             ..TurnStats::default()
         }
     }
@@ -387,109 +413,160 @@ struct Cached {
 }
 static CACHE: OnceLock<Mutex<HashMap<String, Cached>>> = OnceLock::new();
 
-/// Rebuilds OpenCode's turn accounting from its own SQLite store.
-///
-/// OpenCode records one assistant message per model step, each carrying the step's token counts and a
-/// created/completed window, so no stream interception is needed: the last user message marks the
-/// turn, and each assistant message under it is one step of that turn.
+/// 只累计与用量匹配的完整请求窗口，缺失任一步计时就不报告整轮吞吐率。
+#[derive(Default)]
+struct RequestTiming {
+    elapsed_ms: u64,
+    tokens: u64,
+    incomplete: bool,
+}
+impl RequestTiming {
+    fn add(&mut self, output: Option<u64>, duration: Option<u64>) {
+        match (output, duration) {
+            (Some(tokens), Some(ms)) if ms > 0 => {
+                self.tokens = self.tokens.saturating_add(tokens);
+                self.elapsed_ms = self.elapsed_ms.saturating_add(ms);
+            }
+            _ => self.incomplete = true,
+        }
+    }
+    fn rate(&self) -> Option<f64> {
+        (!self.incomplete && self.tokens > 0 && self.elapsed_ms >= 100)
+            .then(|| self.tokens as f64 * 1000.0 / self.elapsed_ms as f64)
+    }
+}
+
 fn opencode_stats_from_messages(messages: &[OpencodeMessage]) -> TurnStats {
-    let turn_id = messages
-        .iter()
-        .rev()
-        .find(|m| m.info.get("role").and_then(Value::as_str) == Some("user"))
-        .and_then(|m| m.info.get("id").and_then(Value::as_str));
+    let input = |m: &OpencodeMessage| matches!(m.info.get("role").and_then(Value::as_str),
+        Some("user" | "synthetic" | "compaction"));
+    let last_input = messages.iter().rposition(input);
+    let modern = last_input.is_some_and(|index| messages[index].info.get("seq").is_some());
+    // 新版 idle 划分整轮，运行中追加提示不另开一轮；没有 idle 时从新版记录开始，排除未迁移的旧历史。
+    let turn_start = if modern {
+        last_input.map(|last_input| {
+            let before = &messages[..last_input];
+            before.iter().rposition(|m| m.info.get("role").and_then(Value::as_str) == Some("idle"))
+                .map(|index| index + 1)
+                .unwrap_or_else(|| before.iter().position(|m| m.info.get("seq").is_some()).unwrap_or(last_input))
+        })
+    } else {
+        last_input.map(|index| index + 1)
+    };
+    let turn_id = (!modern).then_some(last_input).flatten()
+        .and_then(|index| messages[index].info.get("id").and_then(Value::as_str));
     let mut session = Usage::default();
     let mut session_known = false;
     let mut turn = Usage::default();
     let mut turn_known = false;
-    let mut tools: HashSet<String> = HashSet::new();
-    let mut files: HashSet<String> = HashSet::new();
-    let mut generated_tokens = 0u64;
-    let mut generated_ms = 0u64;
-    for message in messages {
+    let mut turn_incomplete = false;
+    let mut tools = HashSet::new();
+    let mut files = HashSet::new();
+    let mut timing = RequestTiming::default();
+    for (index, message) in messages.iter().enumerate() {
         let info = &message.info;
-        if info.get("role").and_then(Value::as_str) != Some("assistant") {
+        if !matches!(info.get("role").and_then(Value::as_str), Some("assistant" | "compaction")) {
             continue;
         }
-        let Some(tokens) = info.get("tokens") else { continue };
-        let usage = opencode_usage(tokens);
-        if tokens.get("total").and_then(Value::as_u64).is_some() {
+        let usage = info.get("tokens").and_then(opencode_usage);
+        if let Some(usage) = usage {
             session.add(usage);
             session_known = true;
         }
-        let in_turn =
-            turn_id.is_none_or(|id| info.get("parentID").and_then(Value::as_str) == Some(id));
+        let in_turn = turn_start.is_none_or(|start| index >= start)
+            && info.get("parentID").and_then(Value::as_str)
+                .is_none_or(|parent| turn_id.is_none_or(|id| parent == id));
         if !in_turn {
             continue;
         }
-        turn.add(usage);
-        turn_known = true;
-        if let Some((ms, produced)) = opencode_step(info, tokens) {
-            generated_ms = generated_ms.saturating_add(ms);
-            generated_tokens = generated_tokens.saturating_add(produced);
+        if let Some(usage) = usage {
+            turn.add(usage);
+            turn_known = true;
+        } else {
+            turn_incomplete = true;
+        }
+        timing.add(usage.map(|u| u.output), opencode_step_ms(info));
+        for path in info.pointer("/snapshot/files").and_then(Value::as_array)
+            .into_iter().flatten().filter_map(Value::as_str)
+        {
+            files.insert(path.to_string());
         }
         for part in &message.parts {
             match part.get("type").and_then(Value::as_str) {
                 Some("tool") => {
-                    let id = part
-                        .get("callID")
-                        .or_else(|| part.get("id"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("tool")
-                        .to_string();
-                    tools.insert(id);
+                    if let Some(id) = part.get("callID").or_else(|| part.get("id")).and_then(Value::as_str) {
+                        tools.insert(id.to_string());
+                    }
+                    if part.pointer("/state/status").and_then(Value::as_str) == Some("completed") {
+                        match part.get("tool").and_then(Value::as_str) {
+                            Some("edit" | "write" | "multiedit") => {
+                                if let Some(input) = part.pointer("/state/input") {
+                                    if let Some(path) = input.get("filePath").and_then(Value::as_str)
+                                        .map(str::to_string).or_else(|| super::tool_file_path(input))
+                                    {
+                                        files.insert(path);
+                                    }
+                                }
+                            }
+                            Some("apply_patch" | "patch") => {
+                                if let Some(patch) = part.pointer("/state/input/patchText")
+                                    .or_else(|| part.pointer("/state/input/patch_text")).and_then(Value::as_str)
+                                {
+                                    files.extend(patch_paths(patch));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 Some("patch") => {
-                    for file in part.get("files").and_then(Value::as_array).into_iter().flatten() {
-                        if let Some(path) = file.as_str() {
-                            files.insert(path.to_string());
-                        }
+                    for path in part.get("files").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+                        files.insert(path.to_string());
                     }
                 }
                 _ => {}
             }
         }
     }
+    let known = turn_known && !turn_incomplete;
+    let rate = timing.rate();
     TurnStats {
-        tokens: turn_known.then_some(turn.output),
-        input_tokens: turn_known.then_some(turn.input),
-        total_tokens: turn_known.then_some(turn.total()),
-        cached_tokens: (turn.cache_known && turn.cached > 0).then_some(turn.cached),
-        cache_hit_percent: (turn.cache_known && turn.input > 0 && turn.cached <= turn.input)
+        tokens: known.then_some(turn.output),
+        input_tokens: known.then_some(turn.input),
+        total_tokens: known.then_some(turn.total()),
+        cached_tokens: (known && turn.cache_known).then_some(turn.cached),
+        cache_hit_percent: (known && turn.cache_known && turn.input > 0 && turn.cached <= turn.input)
             .then(|| turn.cached as f64 * 100.0 / turn.input as f64),
         session_tokens: session_known.then_some(session.total()),
-        tools_used: turn_known.then_some(tools.len() as u32),
-        files_touched: turn_known.then_some(files.len() as u32),
-        generation_tokens_per_second: (generated_ms > 0 && generated_tokens > 0)
-            .then(|| generated_tokens as f64 * 1000.0 / generated_ms as f64),
+        tools_used: turn_start.map(|_| tools.len() as u32),
+        files_touched: turn_start.map(|_| files.len() as u32),
+        generation_tokens_per_second: rate,
+        output_throughput_basis: rate.map(|_| ThroughputBasis::Request),
+        reasoning_tokens: known.then_some(turn.reasoning).flatten(),
         ..TurnStats::default()
     }
 }
 
-/// OpenCode's `tokens` object: uncached input, output, reasoning, and the cache read/write pair. Input
-/// is widened to include cache traffic, matching the Claude accounting the panel already shows.
-fn opencode_usage(tokens: &Value) -> Usage {
-    let input = tokens.get("input").and_then(Value::as_u64).unwrap_or(0);
-    let output = tokens.get("output").and_then(Value::as_u64).unwrap_or(0);
-    let reasoning = tokens.get("reasoning").and_then(Value::as_u64).unwrap_or(0);
-    let cached = tokens.pointer("/cache/read").and_then(Value::as_u64).unwrap_or(0);
+fn opencode_usage(tokens: &Value) -> Option<Usage> {
+    let input = tokens.get("input")?.as_u64()?;
+    let output = tokens.get("output")?.as_u64()?;
+    let reasoning = tokens.get("reasoning").and_then(Value::as_u64);
+    let cache_read = tokens.pointer("/cache/read").and_then(Value::as_u64);
+    let cached = cache_read.unwrap_or(0);
     let created = tokens.pointer("/cache/write").and_then(Value::as_u64).unwrap_or(0);
-    Usage {
+    Some(Usage {
         input: input.saturating_add(cached).saturating_add(created),
-        output: output.saturating_add(reasoning),
+        output: output.saturating_add(reasoning.unwrap_or(0)),
         cached,
-        cache_known: tokens.pointer("/cache/read").is_some(),
-    }
+        cache_known: cache_read.is_some(),
+        reasoning,
+    })
 }
 
-/// One assistant message is one model step, so its created/completed window measures generation rather
-/// than the surrounding tool work. Returns the elapsed milliseconds and the tokens produced.
-fn opencode_step(info: &Value, tokens: &Value) -> Option<(u64, u64)> {
-    let created = info.pointer("/time/created").and_then(Value::as_u64)?;
-    let completed = info.pointer("/time/completed").and_then(Value::as_u64)?;
-    let produced = tokens.get("output").and_then(Value::as_u64).unwrap_or(0)
-        .saturating_add(tokens.get("reasoning").and_then(Value::as_u64).unwrap_or(0));
-    (completed > created && produced > 0).then_some((completed - created, produced))
+fn opencode_step_ms(info: &Value) -> Option<u64> {
+    let created = info.pointer("/time/created")?.as_u64()?;
+    // completed 可能在工具执行后才写入，只有 streamed 能定义模型请求的结束。
+    let streamed = info.pointer("/time/streamed")?.as_u64()?;
+    streamed.checked_sub(created).filter(|ms| *ms > 0)
 }
 
 /// Pi and OMP record one `usage` object per assistant message: uncached input, output with reasoning
@@ -506,6 +583,7 @@ fn pi_usage(usage: &Value) -> Option<Usage> {
         output,
         cached,
         cache_known: cache_read.is_some(),
+        reasoning: usage.get("reasoning").and_then(Value::as_u64).filter(|count| *count <= output),
     })
 }
 
@@ -536,7 +614,8 @@ struct PiAccounting {
     files: HashSet<String>,
     session: Option<Usage>,
     turn: Option<Usage>,
-    timings: HashMap<String, (u64, u64)>,
+    timings: HashMap<String, u64>,
+    missing_usage: HashSet<String>,
     has_turn: bool,
     /// Id of the last entry consumed, which the next appended entry has to name as its parent.
     tail: Option<String>,
@@ -549,6 +628,7 @@ impl PiAccounting {
         self.pending_files.clear();
         self.files.clear();
         self.timings.clear();
+        self.missing_usage.clear();
         self.has_turn = true;
     }
     fn consume(&mut self, entry: &Value) {
@@ -573,6 +653,7 @@ impl PiAccounting {
     }
     fn assistant(&mut self, id: &str, message: &Value) {
         if let Some(usage) = message.get("usage").and_then(pi_usage) {
+            self.missing_usage.remove(id);
             let previous = self.messages.insert(id.to_string(), usage).unwrap_or_default();
             let mut session = self.session.unwrap_or_default().difference(previous);
             session.add(usage);
@@ -587,10 +668,12 @@ impl PiAccounting {
                 }
                 self.turn = Some(turn);
                 self.timings.remove(id);
-                if let Some(ms) = pi_step_ms(message).filter(|_| usage.output > 0) {
-                    self.timings.insert(id.to_string(), (ms, usage.output));
+                if let Some(ms) = pi_step_ms(message) {
+                    self.timings.insert(id.to_string(), ms);
                 }
             }
+        } else if self.has_turn {
+            self.missing_usage.insert(id.to_string());
         }
         let Some(blocks) = message.get("content").and_then(Value::as_array) else {
             return;
@@ -626,21 +709,27 @@ impl PiAccounting {
         }
     }
     fn snapshot(&self) -> TurnStats {
-        let turn = self.turn;
-        let (generated_ms, generated_tokens) = self.timings.values().fold((0u64, 0u64), |(ms, tokens), (m, t)| (ms.saturating_add(*m), tokens.saturating_add(*t)));
+        let turn = self.turn.filter(|_| self.missing_usage.is_empty());
+        let mut timing = RequestTiming::default();
+        timing.incomplete = !self.missing_usage.is_empty();
+        for id in &self.turn_messages {
+            timing.add(self.messages.get(id).map(|u| u.output), self.timings.get(id).copied());
+        }
+        let rate = timing.rate();
         TurnStats {
             tokens: turn.map(|u| u.output),
             input_tokens: turn.map(|u| u.input),
             total_tokens: turn.map(Usage::total),
-            cached_tokens: turn.filter(|u| u.cache_known && u.cached > 0).map(|u| u.cached),
+            cached_tokens: turn.filter(|u| u.cache_known).map(|u| u.cached),
             cache_hit_percent: turn
                 .filter(|u| u.cache_known && u.input > 0 && u.cached <= u.input)
                 .map(|u| u.cached as f64 * 100.0 / u.input as f64),
             session_tokens: self.session.map(Usage::total),
             tools_used: self.has_turn.then_some(self.tools.len() as u32),
             files_touched: self.has_turn.then_some(self.files.len() as u32),
-            generation_tokens_per_second: (generated_ms > 0 && generated_tokens > 0)
-                .then(|| generated_tokens as f64 * 1000.0 / generated_ms as f64),
+            generation_tokens_per_second: rate,
+            output_throughput_basis: rate.map(|_| ThroughputBasis::Request),
+            reasoning_tokens: turn.and_then(|u| u.reasoning),
             ..TurnStats::default()
         }
     }
@@ -720,12 +809,11 @@ fn pi_read_cached(entry: &mut PiCached) -> Result<TurnStats, String> {
         complete_bytes += n as u64;
         suffix.push_str(&line);
     }
-    if pi_branch_broken(entry.accounting.tail.as_deref(), &suffix) {
+    if entry.offset == 0 || pi_branch_broken(entry.accounting.tail.as_deref(), &suffix) {
+        let end = entry.offset + complete_bytes;
         let content = std::fs::read_to_string(&entry.path).map_err(|e| e.to_string())?;
-        entry.accounting = PiAccounting::default();
-        for message in resume::pi_active_branch(&content) {
-            entry.accounting.consume(&message);
-        }
+        let content = content.get(..end as usize).ok_or("Invalid recording boundary")?;
+        entry.accounting = pi_accounting_from_text(content);
     } else {
         for line in suffix.lines() {
             if let Ok(entry_value) = serde_json::from_str::<Value>(line) {
@@ -736,6 +824,23 @@ fn pi_read_cached(entry: &mut PiCached) -> Result<TurnStats, String> {
     entry.offset += complete_bytes;
     entry.modified = modified;
     Ok(entry.accounting.snapshot())
+}
+
+fn pi_accounting_from_text(text: &str) -> PiAccounting {
+    let mut all = PiAccounting::default();
+    for line in text.lines() {
+        if let Ok(entry) = serde_json::from_str::<Value>(line) {
+            all.consume(&entry);
+        }
+    }
+    let mut active = PiAccounting::default();
+    for entry in resume::pi_active_branch(text) {
+        active.consume(&entry);
+    }
+    // 切换分支只改变当前回合，已消耗的历史用量仍计入主会话。
+    active.messages = all.messages;
+    active.session = all.session;
+    active
 }
 
 pub fn current_turn_stats(kind: SessionKind, agent_session_id: &str) -> Result<TurnStats, String> {
@@ -844,14 +949,9 @@ fn parse(text: &str, kind: SessionKind) -> TurnStats {
     accounting.snapshot()
 }
 
-/// Mirrors the file reader for a Pi or OMP recording: only the active branch is accounted.
 #[cfg(test)]
 fn pi_parse(text: &str) -> TurnStats {
-    let mut accounting = PiAccounting::default();
-    for entry in resume::pi_active_branch(text) {
-        accounting.consume(&entry);
-    }
-    accounting.snapshot()
+    pi_accounting_from_text(text).snapshot()
 }
 
 #[cfg(test)]
@@ -973,7 +1073,8 @@ mod tests {
         ]);
         let stats = parse(&text, SessionKind::Claude);
         assert_eq!(stats.tokens, Some(240));
-        assert_eq!(stats.generation_tokens_per_second, Some(60.0));
+        assert_eq!(stats.generation_tokens_per_second, None);
+        assert_eq!(stats.estimated_output_tokens_per_second, Some(60.0));
     }
     #[test]
     fn codex_recorded_rate_pairs_native_usage_and_excludes_tool_and_approval_waits() {
@@ -991,7 +1092,8 @@ mod tests {
         ]);
         let stats = parse(&text, SessionKind::Codex);
         assert_eq!(stats.tokens, Some(240));
-        assert_eq!(stats.generation_tokens_per_second, Some(60.0));
+        assert_eq!(stats.generation_tokens_per_second, None);
+        assert_eq!(stats.estimated_output_tokens_per_second, Some(60.0));
     }
     #[test]
     fn codex_recorded_rate_handles_legacy_usage_without_double_counting_reasoning() {
@@ -1005,7 +1107,8 @@ mod tests {
             stamp(count(240), 22),
         ]), SessionKind::Codex);
         assert_eq!(stats.tokens, Some(120));
-        assert_eq!(stats.generation_tokens_per_second, Some(60.0));
+        assert_eq!(stats.generation_tokens_per_second, None);
+        assert_eq!(stats.estimated_output_tokens_per_second, Some(60.0));
     }
     #[test]
     fn recorded_rate_stays_unknown_for_missing_invalid_or_reversed_timestamps() {
@@ -1042,7 +1145,7 @@ mod tests {
                 rows.push(stamp(json!({"type":"compacted","payload":{}}), 12));
             }
             rows.push(stamp(codex_usage("a", 240), 24));
-            assert_eq!(parse(&lines(rows), SessionKind::Codex).generation_tokens_per_second, None);
+            assert_eq!(parse(&lines(rows), SessionKind::Codex).estimated_output_tokens_per_second, None);
         }
     }
     #[test]
@@ -1053,11 +1156,11 @@ mod tests {
         for row in [stamp(json!({"type":"user","message":{"content":"first"}}), 0), first] {
             accounting.consume(&row.to_string(), SessionKind::Claude);
         }
-        assert_eq!(accounting.snapshot().generation_tokens_per_second, Some(60.0));
+        assert_eq!(accounting.snapshot().estimated_output_tokens_per_second, Some(60.0));
         accounting.consume(&stamp(json!({"type":"user","message":{"content":"next"}}), 30).to_string(), SessionKind::Claude);
         assert_eq!(accounting.snapshot().generation_tokens_per_second, None);
         accounting.consume(&stamp(claude_usage("b", 60, json!([])), 32).to_string(), SessionKind::Claude);
-        assert_eq!(accounting.snapshot().generation_tokens_per_second, Some(30.0));
+        assert_eq!(accounting.snapshot().estimated_output_tokens_per_second, Some(30.0));
     }
     #[test]
     fn recorded_rate_survives_incremental_reads_partial_lines_and_reader_restart() {
@@ -1074,10 +1177,10 @@ mod tests {
         write!(file, "{response}").unwrap();
         assert_eq!(read_cached(&mut entry, SessionKind::Claude).unwrap().generation_tokens_per_second, None);
         writeln!(file).unwrap();
-        assert_eq!(read_cached(&mut entry, SessionKind::Claude).unwrap().generation_tokens_per_second, Some(60.0));
-        assert_eq!(read_cached(&mut entry, SessionKind::Claude).unwrap().generation_tokens_per_second, Some(60.0));
+        assert_eq!(read_cached(&mut entry, SessionKind::Claude).unwrap().estimated_output_tokens_per_second, Some(60.0));
+        assert_eq!(read_cached(&mut entry, SessionKind::Claude).unwrap().estimated_output_tokens_per_second, Some(60.0));
         let mut restarted = Cached { path, ..Cached::default() };
-        assert_eq!(read_cached(&mut restarted, SessionKind::Claude).unwrap().generation_tokens_per_second, Some(60.0));
+        assert_eq!(read_cached(&mut restarted, SessionKind::Claude).unwrap().estimated_output_tokens_per_second, Some(60.0));
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
@@ -1092,7 +1195,7 @@ mod tests {
         assert_eq!(accounting.snapshot().generation_tokens_per_second, Some(30.0));
         assert_eq!(accounting.snapshot().tokens, Some(300));
         accounting.assistant("two", &json!({"usage":{"input":50,"output":100}}));
-        assert_eq!(accounting.snapshot().generation_tokens_per_second, Some(50.0));
+        assert_eq!(accounting.snapshot().generation_tokens_per_second, None);
         accounting.start();
         assert_eq!(accounting.snapshot().generation_tokens_per_second, None);
         assert_eq!(pi_step_ms(&json!({"durationMs":-1})), None);
@@ -1128,13 +1231,20 @@ mod tests {
                 session.id
             };
             let stats = crate::command_core::agent_turn_stats(&ctx, &local_id).unwrap();
-            let rate = stats.generation_tokens_per_second.expect("An audited recording must provide a measured rate");
+            let rate = stats.generation_tokens_per_second.or(stats.estimated_output_tokens_per_second)
+                .expect("A selected recording must provide native timing or a labeled estimate");
             assert!(rate.is_finite() && rate > 0.0);
             assert!(stats.tokens.is_some_and(|tokens| tokens > 0));
             let json = serde_json::to_value(&stats).unwrap();
-            assert_eq!(json["generationTokensPerSecond"].as_f64(), Some(rate));
+            if matches!(kind, SessionKind::Claude | SessionKind::Codex) {
+                assert_eq!(json["generationTokensPerSecond"], Value::Null);
+                assert_eq!(json["estimatedOutputTokensPerSecond"].as_f64(), Some(rate));
+            } else {
+                assert_eq!(json["generationTokensPerSecond"].as_f64(), Some(rate));
+                assert_eq!(json["outputThroughputBasis"], "request");
+            }
             let again = crate::command_core::agent_turn_stats(&ctx, &local_id).unwrap();
-            assert_eq!(again.generation_tokens_per_second, Some(rate), "Opening Info later must not add idle/read time");
+            assert_eq!(again, stats, "Opening Info later must not add idle/read time");
             assert_eq!(std::fs::read(&path).unwrap(), before, "Provider history must stay untouched");
             reports.push(json!({"kind":kind.as_str(),"engine":"tui","agentSessionId":agent_id,"stats":json,"repeatedReadStable":true,"sourceUnchanged":true}));
             println!("{} TUI Info: output={} rate={rate:.3} tok/s; repeated read stable; source unchanged", kind.as_str(), stats.tokens.unwrap());
@@ -1205,8 +1315,8 @@ mod tests {
         ]);
         let stats = pi_parse(&text);
         assert_eq!(stats.total_tokens, Some(330));
-        // The abandoned sibling `a1` is off the branch; `a2` is still an ancestor of the live leaf.
-        assert_eq!(stats.session_tokens, Some(1320));
+        // 活动回合排除弃用分支，但会话总量仍包含已经消耗的 a1。
+        assert_eq!(stats.session_tokens, Some(1430));
         let idle = pi_parse(&lines(vec![json!({"type":"message","id":"u1","parentId":null,"message":{"role":"user","content":"go"}})]));
         assert_eq!(idle.total_tokens, None);
         assert_eq!(idle.session_tokens, None);
@@ -1230,6 +1340,7 @@ mod tests {
 #[cfg(test)]
 mod file_tests {
     use super::*;
+    use serde_json::json;
     use std::io::Write;
     #[test]
     fn appended_partial_lines_are_retried_and_truncation_resets_accounting() {
@@ -1360,7 +1471,7 @@ mod file_tests {
         append("{\"type\":\"message\",\"id\":\"a2\",\"parentId\":\"u1\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":900,\"output\":90},\"content\":[]}}\n");
         let stats = pi_read_cached(&mut cached).unwrap();
         assert_eq!(stats.total_tokens, Some(990));
-        assert_eq!(stats.session_tokens, Some(990));
+        assert_eq!(stats.session_tokens, Some(1100));
         // A recording replaced in place must not keep counts from the file it used to be.
         std::fs::write(&path, user).unwrap();
         let stats = pi_read_cached(&mut cached).unwrap();
@@ -1382,7 +1493,7 @@ mod file_tests {
                         "total": 10 + out + reas + cache, "input": 10, "output": out,
                         "reasoning": reas, "cache": {"read": cache, "write": 0}
                     },
-                    "time": {"created": created, "completed": completed}
+                    "time": {"created": created, "streamed": completed, "completed": completed + 20000}
                 }),
                 parts: vec![
                     serde_json::json!({"id": format!("{id}-tool"), "type": "tool", "callID": format!("call-{id}")}),
@@ -1406,6 +1517,124 @@ mod file_tests {
         assert_eq!(stats.files_touched, Some(1));
         assert!((stats.cache_hit_percent.unwrap() - 90.0 / 110.0 * 100.0).abs() < 0.001);
         assert!((stats.generation_tokens_per_second.unwrap() - 90.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn opencode_idle_boundaries_include_steered_prompts_and_compaction_usage() {
+        let message = |seq: u64, role: &str| OpencodeMessage {
+            info: json!({"id":seq.to_string(),"seq":seq,"role":role}), parts: vec![] };
+        let assistant = |seq: u64| OpencodeMessage { info: json!({"id":seq.to_string(),"seq":seq,
+            "role":"assistant","tokens":{"input":100,"output":50,"reasoning":0,"cache":{"read":0}},
+            "time":{"created":seq * 1000,"streamed":seq * 1000 + 1000}}), parts: vec![] };
+        let mut current = assistant(5);
+        current.parts = vec![json!({"id":"edit","type":"tool","tool":"edit",
+            "state":{"status":"completed","input":{"filePath":"a.ts"}}}),
+            json!({"id":"fail","type":"tool","tool":"write",
+            "state":{"status":"error","input":{"filePath":"failed.ts"}}})];
+        current.info["snapshot"] = json!({"files":["a.ts","b.ts"]});
+        let mut messages = vec![message(0,"user"), assistant(1), message(2,"idle"),
+            message(3,"user"), current, message(6,"user"), assistant(7), message(8,"idle")];
+        let stats = opencode_stats_from_messages(&messages);
+        assert_eq!(stats.total_tokens, Some(300));
+        assert_eq!(stats.session_tokens, Some(450));
+        assert_eq!(stats.generation_tokens_per_second, Some(50.0));
+        assert_eq!(stats.files_touched, Some(2));
+        let mut compact = message(9,"compaction");
+        compact.info["tokens"] = json!({"input":200,"output":20,"reasoning":0,"cache":{"read":0}});
+        messages.push(compact);
+        messages.push(assistant(10));
+        let stats = opencode_stats_from_messages(&messages);
+        assert_eq!(stats.total_tokens, Some(370));
+        assert_eq!(stats.session_tokens, Some(820));
+        // 压缩没有完整请求计时，不能把之后一个 assistant 的速率当成本轮吞吐率。
+        assert_eq!(stats.generation_tokens_per_second, None);
+        messages.push(message(11,"idle"));
+        messages.push(message(12,"user"));
+        let stats = opencode_stats_from_messages(&messages);
+        assert_eq!(stats.total_tokens, None);
+        assert_eq!(stats.files_touched, Some(0));
+    }
+
+    #[test]
+    fn opencode_mixed_history_does_not_merge_legacy_usage_into_the_first_modern_turn() {
+        let messages = vec![
+            OpencodeMessage { info: json!({"id":"old-user","role":"user"}), parts: vec![] },
+            OpencodeMessage { info: json!({"id":"old-assistant","role":"assistant","parentID":"old-user",
+                "tokens":{"input":1000,"output":500}}), parts: vec![] },
+            OpencodeMessage { info: json!({"id":"new-user","role":"user","seq":0}), parts: vec![] },
+            OpencodeMessage { info: json!({"id":"new-assistant","role":"assistant","seq":1,
+                "tokens":{"input":100,"output":50,"reasoning":0,"cache":{"read":0}},
+                "time":{"created":1000,"streamed":2000}}), parts: vec![] },
+        ];
+        let stats = opencode_stats_from_messages(&messages);
+        assert_eq!(stats.total_tokens, Some(150));
+        assert_eq!(stats.session_tokens, Some(1650));
+        assert_eq!(stats.generation_tokens_per_second, Some(50.0));
+    }
+
+    #[test]
+    fn request_throughput_requires_every_step_and_preserves_zero_usage() {
+        let mut timing = RequestTiming::default();
+        timing.add(Some(200), Some(1000));
+        timing.add(Some(0), Some(1000));
+        assert_eq!(timing.rate(), Some(100.0));
+        timing.add(Some(100), None);
+        assert_eq!(timing.rate(), None);
+        let mut missing = RequestTiming::default();
+        missing.add(None, Some(1000));
+        assert_eq!(missing.rate(), None);
+    }
+
+    #[test]
+    fn opencode_usage_without_total_and_missing_stream_boundaries_are_distinct() {
+        let user = OpencodeMessage { info: json!({"id":"u","role":"user"}), parts: vec![] };
+        let assistant = OpencodeMessage {
+            info: json!({"id":"a","role":"assistant","tokens":{
+                "input":100,"output":200,"reasoning":50,"cache":{"read":0,"write":0}},
+                "time":{"created":1000,"streamed":2000,"completed":99000}}),
+            parts: vec![],
+        };
+        let stats = opencode_stats_from_messages(&[user.clone(), assistant.clone()]);
+        assert_eq!(stats.tokens, Some(250));
+        assert_eq!(stats.total_tokens, Some(350));
+        assert_eq!(stats.session_tokens, Some(350));
+        assert_eq!(stats.cached_tokens, Some(0));
+        assert_eq!(stats.cache_hit_percent, Some(0.0));
+        assert_eq!(stats.reasoning_tokens, Some(50));
+        assert_eq!(stats.generation_tokens_per_second, Some(250.0));
+        assert_eq!(stats.output_throughput_basis, Some(ThroughputBasis::Request));
+        let mut no_stream = assistant.clone();
+        no_stream.info["time"].as_object_mut().unwrap().remove("streamed");
+        let stats = opencode_stats_from_messages(&[user.clone(), assistant.clone(), no_stream]);
+        assert_eq!(stats.tokens, Some(500));
+        assert_eq!(stats.generation_tokens_per_second, None);
+        let mut no_output = assistant;
+        no_output.info["tokens"].as_object_mut().unwrap().remove("output");
+        let stats = opencode_stats_from_messages(&[user, no_output]);
+        assert_eq!(stats.tokens, None);
+        assert_eq!(stats.total_tokens, None);
+        assert_eq!(stats.cached_tokens, None);
+        assert_eq!(stats.generation_tokens_per_second, None);
+    }
+
+    #[test]
+    fn pi_cache_zero_reasoning_and_missing_timing_do_not_inflate_throughput() {
+        let mut accounting = PiAccounting::default();
+        accounting.start();
+        accounting.assistant("a", &json!({"usage":{"input":100,"output":200,
+            "reasoning":150,"cacheRead":0},"durationMs":1000}));
+        let stats = accounting.snapshot();
+        assert_eq!(stats.tokens, Some(200));
+        assert_eq!(stats.reasoning_tokens, Some(150));
+        assert_eq!(stats.cached_tokens, Some(0));
+        assert_eq!(stats.cache_hit_percent, Some(0.0));
+        assert_eq!(stats.generation_tokens_per_second, Some(200.0));
+        accounting.assistant("b", &json!({"usage":{"input":100,"output":100,"cacheRead":0}}));
+        assert_eq!(accounting.snapshot().tokens, Some(300));
+        assert_eq!(accounting.snapshot().generation_tokens_per_second, None);
+        accounting.assistant("c", &json!({"usage":{"input":100}}));
+        assert_eq!(accounting.snapshot().tokens, None);
+        assert_eq!(accounting.snapshot().generation_tokens_per_second, None);
     }
 
     /// Opt-in read-only validation against a locally selected provider transcript. Only numeric

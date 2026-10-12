@@ -22,9 +22,50 @@ describe("This turn", () => {
     expect(within(panel).getByText("320k")).toBeTruthy();
     expect(within(panel).getByText("88.0%")).toBeTruthy();
     expect(within(panel).getByText("32.0 tok/s")).toBeTruthy();
-    expect(within(panel).getByText("average output").closest(".turn-metric")?.getAttribute("title"))
+    expect(within(panel).getByText("output throughput").closest(".turn-metric")?.getAttribute("title"))
       .toContain("not pure model decoding speed");
     expect(within(panel).getByText("0")).toBeTruthy();
+    // 精确整数放在值元素的 title 上。
+    expect(within(panel).getByText("13.6k").getAttribute("title")).toBe("13,600");
+  });
+  it("shows known-zero cache clearly and unknown cache as absent", () => {
+    const { rerender } = render(<TurnStatsView stats={{ ...stats, cachedTokens: 0, cacheHitPercent: 0 }} />);
+    const zeroCell = screen.getByText("cache read share").closest(".turn-metric") as HTMLElement;
+    expect(zeroCell.title).toContain("0 cached input tokens");
+    expect(within(zeroCell).getByText("0.0%")).toBeTruthy();
+    rerender(<TurnStatsView stats={{ ...stats, cachedTokens: null, cacheHitPercent: null }} />);
+    const unknownCell = screen.getByText("cache read share").closest(".turn-metric") as HTMLElement;
+    expect(unknownCell.title).toContain("unknown");
+    expect(within(unknownCell).getByText("—")).toBeTruthy();
+  });
+  it("keeps the estimated rate secondary when the primary rate is absent or non-positive", () => {
+    const onlyEstimated = { estimatedOutputTokensPerSecond: 3.26 } as AgentTurnStats;
+    render(<TurnStatsView stats={onlyEstimated} />);
+    // 仅估算数据也算有本轮指标。
+    expect(screen.getByText("turn usage")).toBeTruthy();
+    const rateCell = screen.getByText("output throughput").closest(".turn-metric") as HTMLElement;
+    expect(within(rateCell).getByText("—")).toBeTruthy();
+    expect(within(rateCell).getByText("response estimate ≈3.3 tok/s")).toBeTruthy();
+    cleanup();
+    render(<TurnStatsView stats={{ ...stats, generationTokensPerSecond: 0 }} />);
+    const zeroCell = screen.getByText("output throughput").closest(".turn-metric") as HTMLElement;
+    expect(within(zeroCell).getByText("—")).toBeTruthy();
+    expect(zeroCell.textContent).not.toContain("tok/s");
+  });
+  it("labels the primary rate with its request or streaming basis", () => {
+    const { rerender } = render(<TurnStatsView stats={{ ...stats, outputThroughputBasis: "request" }} />);
+    expect(screen.getByText("request time")).toBeTruthy();
+    rerender(<TurnStatsView stats={{ ...stats, outputThroughputBasis: "stream" }} />);
+    expect(screen.getByText("streaming phase")).toBeTruthy();
+    const title = screen.getByText("output throughput").closest(".turn-metric")?.getAttribute("title");
+    expect(title).toContain("first response");
+    expect(title).toContain("streaming window");
+  });
+  it("shows reasoning detail in the output title and secondary text", () => {
+    render(<TurnStatsView stats={{ ...stats, reasoningTokens: 950 }} />);
+    // 推理精确值在输出值元素的 title 上。
+    expect(screen.getByText("1.6k").getAttribute("title")).toContain("incl. reasoning 950");
+    expect(screen.getByText("incl. reasoning 950")).toBeTruthy();
   });
   it("shows absent metrics as unknown and caps only the visual context meter", () => {
     const { rerender } = render(<TurnStatsView stats={null} state="error" />);
@@ -42,11 +83,17 @@ describe("This turn", () => {
     expect(within(panel).queryByRole("progressbar")).toBeNull();
     expect(within(panel).getByText("73.0k / —")).toBeTruthy();
   });
-  it("updates the output-rate label and explanation when the language changes", async () => {
-    render(<TurnStatsView stats={stats} />);
+  it("keeps all six metric labels in English while localizing explanations", async () => {
+    render(<TurnStatsView stats={{ ...stats, reasoningTokens: 950 }} />);
     act(() => setLang("zh-CN"));
-    const label = await screen.findByText("平均输出速度");
-    expect(label.closest(".turn-metric")?.getAttribute("title")).toContain("并非模型的纯解码速度");
+    expect(await screen.findByText("其中推理 950")).toBeTruthy();
+    for (const label of ["turn usage", "input tokens", "output tokens", "cache read share", "output throughput", "recorded edited files"]) {
+      expect(screen.getByText(label)).toBeTruthy();
+    }
+    const outputCell = screen.getByText("output tokens").closest(".turn-metric") as HTMLElement;
+    expect(outputCell.title).toContain("推理 token");
+    expect(within(outputCell).getByText("其中推理 950")).toBeTruthy();
+    expect(screen.getByText("1.6k").getAttribute("title")).toContain("其中推理 950");
     expect(screen.getByText("32.0 tok/s")).toBeTruthy();
   });
   it("rejects a late response from a previously selected session", async () => {

@@ -133,15 +133,32 @@ With an agent session open, the Info tab of the right panel shows:
 - **This turn** (Claude, Codex, Grok Build, OpenCode, Pi, OMP, Kiro, Antigravity): the model, how full the context window is, and the current turn's token counts and tools.
 - **Resources**: CPU and memory of the session's processes; the "system" option adds figures for the whole computer.
 
-**Average output** is estimated output tokens per second, including reasoning when reported, rather
-than pure model decoding speed. Claude Code and Codex terminal sessions use timestamps in their own
-recordings and exclude recorded tool waits (including approval or user-input waits inside those calls).
-Pi uses its recorded response duration, Grok Build uses per-turn model API time (available after the
-turn completes), and Antigravity uses first-token plus streaming duration from its native conversation
-database. These measurements exclude tool execution and time between user messages. Older recordings
-without native timing remain unavailable. Reopening Info or restarting VelaTerm does not add idle time.
-Missing timestamps, unmatched tool boundaries, overlapping generation, or context compaction can leave
-the estimate unavailable (`—`).
+The six turn metrics use the following definitions:
+
+- **Turn usage**: cumulative input plus output across model requests in this turn. The same context is counted again when sent in another request, so this differs from the current context size.
+- **Input tokens**: input across those requests, including cache reads and writes.
+- **Output tokens**: generated output, including reported reasoning exactly once. When available, reasoning is shown as a part of this count.
+- **Cache read share**: cached input tokens divided by all input tokens. A reported zero is `0.0%`; an unknown count is `—`.
+- **Output throughput**: total output tokens divided by the total matching model time. The source is labeled **request time** or **streaming phase**. Every request or observed message must have matching usage and timing; incomplete timing leaves the primary value as `—`.
+- **Recorded edited files**: distinct paths of successful edits explicitly recorded in the session. This is not a complete account of shell or child-agent changes, nor the final Git diff.
+
+Request time includes the wait for the first response. Pi and OMP use recorded response durations,
+Grok Build uses per-turn model API time (available after completion), and Antigravity uses first-token
+plus streaming duration. OpenCode uses the recorded provider-stream end before tool settlement;
+records that only have a final completion time do not supply request throughput. OpenCode's legacy
+and current stores are both supported, and prompts steered into a current OpenCode turn share its
+usage until the native idle marker.
+
+An observed streaming phase is used only when it covers the full recorded output and request timing
+is unavailable. These measurements exclude tool execution and user waits; they are not pure model
+decoding speed. Claude Code and Codex terminal recordings without model request boundaries may show a
+separate **response estimate ≈… tok/s**, derived from turn timestamps minus recorded tool waits.
+Missing timestamps, unmatched tool boundaries, overlapping generation or context compaction can make
+that estimate unavailable too. Reopening Info or restarting VelaTerm does not add idle time.
+
+**Session total** accumulates recorded main-session input and output, including cached input. Pi and
+OMP retain usage spent on abandoned branches when the active branch changes. Independent child-agent
+sessions are not fully represented in these turn or session totals.
 
 ## 9. Transcripts, export and archiving
 

@@ -360,8 +360,13 @@ export interface AgentTurnStats {
   contextTokens: number | null;
   contextLimit: number | null;
   contextPercent: number | null;
-  /** Estimated output throughput over measured response time, including reported reasoning. */
+  /** 与本轮用量完整匹配的请求或流式吞吐率，包含已报告的推理用量。 */
   generationTokensPerSecond: number | null;
+  outputThroughputBasis?: "request" | "stream" | null;
+  /** 回合时间戳估算，独立于原生请求吞吐率显示。 */
+  estimatedOutputTokensPerSecond?: number | null;
+  /** 输出中的推理部分；已包含在 tokens 中。 */
+  reasoningTokens?: number | null;
 }
 
 /** Queries provider usage and activity. Unsupported metrics are null; unreadable recordings reject. */

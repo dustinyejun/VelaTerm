@@ -1,6 +1,5 @@
-//! TUI recordings have response/usage timestamps, but no live protocol stream. Estimate response
-//! throughput from those durable boundaries, excluding the union of tool/approval waits. Never use
-//! transcript read time: opening Info later, resuming, or replaying a recording must keep the same rate.
+//! 终端日志只有回合和用量时间戳时，估算响应吞吐率并扣除工具等待的并集。
+//! 此估算不等同于原生模型请求计时，必须单独标注；读取或重放日志不改变耗时。
 use serde_json::Value;
 use std::collections::HashSet;
 

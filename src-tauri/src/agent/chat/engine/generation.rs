@@ -1,6 +1,5 @@
-//! Average output throughput for the current root turn, including reported reasoning. Provider message
-//! windows are used where available; Codex measures the observed turn minus explicit blocking waits.
-//! Missing boundaries, overlapping work or mismatched usage leave the Codex estimate unavailable.
+//! 实时流式窗口必须覆盖整轮输出；Codex 的回合减等待算法仅提供响应估算。
+//! 原生请求计时优先，缺失边界或用量无法完整匹配时不覆盖录制统计。
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -20,20 +19,29 @@ pub(super) struct GenerationTiming {
 impl GenerationTiming {
     pub fn rate(&self) -> Option<f64> {
         if self.codex.turn_id.is_some() {
-            return self.codex.rate();
+            return None;
         }
         let mut tokens = 0u64;
         let mut elapsed = 0u64;
         for sample in self.samples.values() {
             if !sample.complete || sample.end <= sample.start {
-                continue;
+                return None;
             }
-            if let Some(count) = sample.tokens {
-                tokens = tokens.saturating_add(count);
-                elapsed = elapsed.saturating_add(sample.end - sample.start);
-            }
+            let count = sample.tokens?;
+            tokens = tokens.saturating_add(count);
+            elapsed = elapsed.saturating_add(sample.end - sample.start);
         }
         (elapsed >= 100 && tokens > 0).then(|| tokens as f64 * 1000.0 / elapsed as f64)
+    }
+    pub fn rate_for_output(&self, expected: Option<u64>) -> Option<f64> {
+        let mut output = 0u64;
+        for sample in self.samples.values() {
+            output = output.checked_add(sample.tokens?)?;
+        }
+        (expected == Some(output)).then(|| self.rate()).flatten()
+    }
+    pub fn estimated_rate(&self) -> Option<f64> {
+        self.codex.rate()
     }
     pub fn claude(&mut self, value: &Value, now: u64) {
         if value
@@ -298,9 +306,9 @@ mod tests {
         let usage = json!({"turnId":"turn-a","tokenUsage":{
             "total":{"outputTokens":100000},"last":{"outputTokens":2193,"reasoningOutputTokens":1900}}});
         timing.codex("thread/tokenUsage/updated", &usage, 31300);
-        assert!((timing.rate().unwrap() - 2193.0 / 30.3).abs() < 0.001);
+        assert!((timing.estimated_rate().unwrap() - 2193.0 / 30.3).abs() < 0.001);
         timing.codex("thread/tokenUsage/updated", &usage, 100000);
-        assert!((timing.rate().unwrap() - 2193.0 / 30.3).abs() < 0.001);
+        assert!((timing.estimated_rate().unwrap() - 2193.0 / 30.3).abs() < 0.001);
     }
     #[test]
     fn codex_excludes_the_union_of_parallel_tools_and_user_waits() {
@@ -319,7 +327,7 @@ mod tests {
         timing.codex("item/completed", &second, 20000);
         timing.codex("thread/tokenUsage/updated", &json!({"tokenUsage":{
             "total":{"outputTokens":600},"last":{"outputTokens":100}}}), 22000);
-        assert_eq!(timing.rate(), Some(50.0));
+        assert_eq!(timing.estimated_rate(), Some(50.0));
     }
     #[test]
     fn codex_without_turn_start_has_no_rate_even_with_visible_output() {
@@ -327,7 +335,7 @@ mod tests {
         timing.codex("item/agentMessage/delta", &json!({}), 1000);
         timing.codex("thread/tokenUsage/updated", &json!({"tokenUsage":{
             "total":{"outputTokens":500},"last":{"outputTokens":100}}}), 3000);
-        assert_eq!(timing.rate(), None);
+        assert_eq!(timing.estimated_rate(), None);
         assert_eq!(GenerationTiming::default().rate(), None);
     }
     #[test]
@@ -337,7 +345,7 @@ mod tests {
         timing.codex("item/started", &json!({"item":{"id":"tool-a","type":"fileChange"}}), 3000);
         timing.codex("thread/tokenUsage/updated", &json!({"tokenUsage":{
             "total":{"outputTokens":100},"last":{"outputTokens":100}}}), 50000);
-        assert_eq!(timing.rate(), Some(50.0));
+        assert_eq!(timing.estimated_rate(), Some(50.0));
     }
     #[test]
     fn codex_drops_estimates_with_overlapping_output_or_missing_wait_boundaries() {
@@ -354,7 +362,7 @@ mod tests {
             }
             timing.codex("thread/tokenUsage/updated", &json!({"tokenUsage":{
                 "total":{"outputTokens":100},"last":{"outputTokens":100}}}), 4000);
-            assert_eq!(timing.rate(), None);
+            assert_eq!(timing.estimated_rate(), None);
         }
     }
     #[test]
@@ -363,20 +371,20 @@ mod tests {
         timing.codex("turn/started", &json!({"turn":{"id":"turn-a"}}), 1000);
         timing.codex("thread/tokenUsage/updated", &json!({"turnId":"older","tokenUsage":{
             "total":{"outputTokens":100},"last":{"outputTokens":100}}}), 2000);
-        assert_eq!(timing.rate(), None);
+        assert_eq!(timing.estimated_rate(), None);
         timing.codex("thread/tokenUsage/updated", &json!({"turnId":"turn-a","tokenUsage":{
             "total":{"outputTokens":200},"last":{"outputTokens":100}}}), 3000);
-        assert_eq!(timing.rate(), Some(50.0));
+        assert_eq!(timing.estimated_rate(), Some(50.0));
         timing.codex("thread/tokenUsage/updated", &json!({"turnId":"turn-a","tokenUsage":{
             "total":{"outputTokens":500},"last":{"outputTokens":100}}}), 5000);
-        assert_eq!(timing.rate(), None);
+        assert_eq!(timing.estimated_rate(), None);
         timing.codex("turn/completed", &json!({"turn":{"id":"older"}}), 6000);
         assert!(timing.codex.running);
         timing.codex("turn/completed", &json!({"turn":{"id":"turn-a"}}), 7000);
         timing.codex("turn/started", &json!({"turn":{"id":"turn-b"}}), 8000);
         timing.codex("thread/tokenUsage/updated", &json!({"turnId":"turn-b","tokenUsage":{
             "total":{"outputTokens":600},"last":{"outputTokens":100}}}), 10000);
-        assert_eq!(timing.rate(), Some(50.0));
+        assert_eq!(timing.estimated_rate(), Some(50.0));
     }
     #[test]
     fn codex_missing_tool_completion_cannot_hide_a_second_response() {
@@ -385,10 +393,10 @@ mod tests {
         timing.codex("item/started", &json!({"item":{"id":"tool-a","type":"commandExecution"}}), 3000);
         timing.codex("thread/tokenUsage/updated", &json!({"tokenUsage":{
             "total":{"outputTokens":100},"last":{"outputTokens":100}}}), 4000);
-        assert_eq!(timing.rate(), Some(50.0));
+        assert_eq!(timing.estimated_rate(), Some(50.0));
         timing.codex("thread/tokenUsage/updated", &json!({"tokenUsage":{
             "total":{"outputTokens":200},"last":{"outputTokens":100}}}), 8000);
-        assert_eq!(timing.rate(), None);
+        assert_eq!(timing.estimated_rate(), None);
     }
     #[test]
     fn codex_unknown_usage_compaction_and_invalid_clock_have_no_rate() {
@@ -401,16 +409,40 @@ mod tests {
             let usage = if event == "missing-usage" { json!({"tokenUsage":{"total":{"outputTokens":100}}}) }
                 else { json!({"tokenUsage":{"total":{"outputTokens":100},"last":{"outputTokens":100}}}) };
             timing.codex("thread/tokenUsage/updated", &usage, if event == "clock" { 900 } else { 3000 });
-            assert_eq!(timing.rate(), None);
+            assert_eq!(timing.estimated_rate(), None);
         }
     }
     #[test]
-    fn pi_times_each_assistant_message_and_ignores_one_without_a_token_count() {
+    fn stream_rate_must_match_the_complete_turn_output() {
+        let mut timing = GenerationTiming::default();
+        timing.pi_start("one", 1000);
+        timing.pi_end("one", Some(120), 3000);
+        assert_eq!(timing.rate_for_output(Some(120)), Some(60.0));
+        assert_eq!(timing.rate_for_output(Some(240)), None);
+        assert_eq!(timing.rate_for_output(None), None);
+        timing.pi_start("two", 4000);
+        assert_eq!(timing.rate_for_output(Some(120)), None);
+        timing.pi_end("two", Some(0), 6000);
+        assert_eq!(timing.rate_for_output(Some(120)), Some(30.0));
+    }
+    #[test]
+    fn codex_active_turn_is_only_a_labeled_estimate() {
+        let mut timing = GenerationTiming::default();
+        timing.codex("turn/started", &json!({"turn":{"id":"one"}}), 1000);
+        timing.codex("thread/tokenUsage/updated", &json!({"turnId":"one","tokenUsage":{
+            "total":{"outputTokens":120},"last":{"outputTokens":120}}}), 3000);
+        assert_eq!(timing.rate(), None);
+        assert_eq!(timing.rate_for_output(Some(120)), None);
+        assert_eq!(timing.estimated_rate(), Some(60.0));
+    }
+    #[test]
+    fn pi_requires_usage_for_every_observed_message() {
         let mut timing = GenerationTiming::default();
         timing.pi_start("pi-a0", 1000);
         timing.pi_end("pi-a0", Some(120), 3000);
         timing.pi_start("pi-a1", 4000);
         timing.pi_end("pi-a1", None, 9000);
-        assert_eq!(timing.rate(), Some(60.0));
+        assert_eq!(timing.rate(), None);
+        assert_eq!(timing.rate_for_output(Some(120)), None);
     }
 }
