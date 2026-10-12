@@ -248,10 +248,14 @@ Build and test:
 ```bash
 pnpm build                                        # type-check and bundle the frontend
 pnpm tauri build                                  # build the desktop application
+pnpm build:dmg                                    # macOS: generate a DMG without opening Finder
 pnpm test                                         # frontend tests (vitest)
 pnpm lint                                         # eslint
 cargo test --manifest-path src-tauri/Cargo.toml   # backend tests
 ```
+
+`build:dmg` writes the installer to `src-tauri/target/release/bundle/dmg/` for manual installation.
+It skips the background and icon-layout step that opens Finder, so the DMG uses the default layout.
 
 ### Project layout
 

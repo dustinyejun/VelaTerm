@@ -17,6 +17,7 @@
     "dev:ls": "node ./scripts/dev-instances.cjs ls",
     "dev:stop": "node ./scripts/dev-instances.cjs stop",
     "build": "tsc && vite build",
+    "build:dmg": "CI=true TAURI_BUNDLER_DMG_IGNORE_CI=false tauri build --bundles dmg --ci",
     "preview": "vite preview",
     "tauri": "tauri",
     "lint": "eslint .",

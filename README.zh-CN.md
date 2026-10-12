@@ -221,10 +221,14 @@ pnpm dev:stop <label> # 按标签停止某一个实例
 ```bash
 pnpm build                                        # 类型检查并打包前端
 pnpm tauri build                                  # 构建桌面应用
+pnpm build:dmg                                    # macOS：静默生成 DMG，不打开 Finder
 pnpm test                                         # 前端测试（vitest）
 pnpm lint                                         # eslint
 cargo test --manifest-path src-tauri/Cargo.toml   # 后端测试
 ```
+
+`build:dmg` 将安装包写入 `src-tauri/target/release/bundle/dmg/`，安装由你手动完成。
+此命令跳过需要打开 Finder 的背景和图标布局步骤，生成的 DMG 使用默认布局。
 
 ### 目录结构
 
